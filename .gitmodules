@@ -1,3 +1,6 @@
 [submodule "imgui"]
 	path = imgui
 	url = git@github.com:ocornut/imgui.git
+[submodule "mio"]
+	path = mio
+	url = git@github.com:mandreyel/mio.git

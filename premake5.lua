@@ -29,8 +29,9 @@ filter {"system:windows"}
 	disablewarnings { "4365"} -- 'argument': conversion from 'X' to 'Y', signed/unsigned mismatch
 	disablewarnings { "4388"} -- signed/unsigned mismatch
 	disablewarnings { "4464"} -- relative include path contains '..'
-	disablewarnings { "4514"} -- unreferenced inline function has been removed
 	disablewarnings { "4505"} -- unreferenced local function has been removed
+	disablewarnings { "4514"} -- unreferenced inline function has been removed
+	disablewarnings { "4577"} -- 'noexcept' used with no exception handling mode specified; termination on exception is not guaranteed. Specify /EHsc
 	disablewarnings { "4623"} -- default constructor was implicitly defined as deleted
 	disablewarnings { "4625"} -- copy constructor was implicitly defined as deleted
 	disablewarnings { "4626"} -- assignment operator was implicitly defined as deleted
@@ -109,7 +110,10 @@ project "TraceViewer"
 -- NOTE: the library link order is sensitive because of linux linker fuckery
 	kind "WindowedApp"
 	files { "TraceViewer.cpp" }
-	includedirs {"imgui/examples/libs/gl3w"}
+	includedirs {
+		"imgui/examples/libs/gl3w",
+		"mio/include"
+	}
 	filter {"system:windows"}
 		files { "*.rc" }
 		entrypoint "WinMainCRTStartup"
