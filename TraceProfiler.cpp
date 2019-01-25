@@ -73,6 +73,7 @@ static std::vector<std::thread> s_writeThreads;
 static uint64_t s_microStart;
 static uint64_t s_tscStart;
 static uint64_t s_ticksPerMicro;
+static bool s_init = false;
 
 THREAD_LOCAL TraceThread_t* __tr_thread;
 
@@ -250,6 +251,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 
 void TraceBeginThread(const char* name, uint32_t id) {
 	TRACE_ASSERT(!__tr_thread);
+	TRACE_VERIFY(s_init);
 	
 	auto thread = TraceThreadGrow();
 	thread->id = id;
@@ -288,30 +290,34 @@ uint32_t TraceGetCurrentThreadID() {
 }
 
 void TraceInit(const char* path) {
+	TRACE_VERIFY(!s_init);
 
-	const auto micro_start = GetMicroseconds();
-	const auto tsc_start = TRACE_RDTSC();
+	if (!s_init) {
+		s_init = true;
+		const auto micro_start = GetMicroseconds();
+		const auto tsc_start = TRACE_RDTSC();
 
-	uint64_t micro_end;
-	uint64_t tsc_end;
+		uint64_t micro_end;
+		uint64_t tsc_end;
 
-	for (;;) {
-		tsc_end = TRACE_RDTSC();
-		micro_end = GetMicroseconds();
-		if ((micro_end - micro_start) > 100000) {
-			break;
+		for (;;) {
+			tsc_end = TRACE_RDTSC();
+			micro_end = GetMicroseconds();
+			if ((micro_end - micro_start) > 100000) {
+				break;
+			}
 		}
+
+		s_ticksPerMicro = (tsc_end - tsc_start) / (micro_end - micro_start);
+
+		strcpy(&s_tracePath[0], path);
+		s_tscStart = TRACE_RDTSC();
+		s_microStart = GetMicroseconds();
 	}
-
-	s_ticksPerMicro = (tsc_end - tsc_start) / (micro_end - micro_start);
-
-	strcpy(&s_tracePath[0], path);
-	s_tscStart = TRACE_RDTSC();
-	s_microStart = GetMicroseconds();
 }
 
 void TraceShutdown() {
-
+	s_init = false;
 	LOCK L(M);
 	for (auto& thread : s_writeThreads) {
 		thread.join();
