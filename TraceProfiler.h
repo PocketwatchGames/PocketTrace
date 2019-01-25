@@ -544,7 +544,7 @@ struct __TR_THREADPOP : TraceNotCopyable {
 	} ((void)0)
 
 #define __TRLABEL(_label, _location) \
-	if (__tr_blocks.count > 1) {--__tr_blocks.count; }\
+	if (__tr_blocks.count > 1) {--__tr_blocks.count; __TRACEPOPFNNAME(); }\
 	__TRPUSH(_label, _location)
 
 #define TRLABEL(_label) __TRLABEL(_label, __FILE__ ":" STRINGIZE(__LINE__))
