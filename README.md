@@ -22,6 +22,10 @@ files you wish to trace. Place ```TRACE()``` macros in any functions you want to
 ```#define TRACE_PROFILER``` in order to turn on profiling. If ```TRACE_PROFILER``` is not defined then 
 all the various ```TRACE()``` macros will be noops (useful when you ship your game). 
 
+The profiler stores all the profile data in memory. For long-running applications this can add up to
+100s or even gigabytes of allocated memory. For our purposes at Pocketwatch this is fine. Just be aware
+in case that's something that is no good for your project.
+
 ### 1) Add TraceProfiler.cpp to your project
 
 The simplest way to include the profiler is by adding TraceProfiler.cpp directly to your project. If you
@@ -71,6 +75,11 @@ your main thread) you need to place the ```TRTHREADPROC()``` macro like so:
 static void SomeOtherThread() {
 	TRTHREADPROC("SomeOtherThread");
 	TRACE();
+
+	while (doingStuff) {
+		... do things
+		TRACE_WRITEBLOCKS();
+	}
 }
 
 int main(int argc, const char** argv) {
@@ -87,7 +96,9 @@ int main(int argc, const char** argv) {
 	std::thread thread(SomeOtherThread);
 
 	// Call into application with other code that has TRACE()
-	while (ApplicationTick()) {}
+	while (ApplicationTick()) {
+		TRACE_WRITEBLOCKS();
+	}
 
 	thread.join();
 
@@ -95,7 +106,23 @@ int main(int argc, const char** argv) {
 }
 ```
 
-### 4) OTHER MACROs
+```TRACE_WRITEBLOCKS()``` is something you should call at regular intervals. It is a very lightweight call and
+simply does an atomic update of the trace block counter that is available for writting, which is used by
+background threads of the trace profiler. This isn't _required_ but it does let the profiler flush data to
+disk as it is being generated which means the app will exit quickly instead of having to wait while 100s of mbs
+of data is flushed to disk at the end.
+
+### 4) Profiling Overhead
+
+We haven't actually measured the overhead here at Pocketwatch because we haven't noticed a difference
+with profiling on vs off. By default here we compile TraceProfiler.cpp with full optimizations on, even
+in debug builds.
+
+If you're building your whole project with optimizations on you can define TRACE_INLINE 
+which will expose the trace push/pop functions directly as inlines which will likely reduce 
+the call overhead even more.
+
+### 5) OTHER MACROs
 
 ```c++
 TRBLOCK(_label)
@@ -132,7 +159,7 @@ void Foo() {
 ```TRLABEL()``` lets you time individual sections of a function that aren't inside
 a block. It does this be popping off an existing block or label and pushing a new one.
 
-### 5) Notes on building as a lib or directly including TraceProfiler.cpp in your project.
+### 6) Notes on building as a lib or directly including TraceProfiler.cpp in your project.
 
 _This section only concerns you if your project consists of multiple DLLs that you wish to trace AND
 you don't want to build TraceProfiler.cpp into a DLL and link against that._ 
