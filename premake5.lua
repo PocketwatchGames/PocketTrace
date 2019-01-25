@@ -64,10 +64,9 @@ filter "system:macosx"
 filter "system:linux"
 	toolset "clang"
 	buildoptions {"-stdlib=libstdc++", "-fvisibility=default"}
-filter "files:*.lua"
+filter "files:*.lua or *.md or *.txt"
 	flags {"ExcludeFromBuild"}
 filter {}
-files {"premake5.lua"}
 
 function link_opengl()
 	filter {"kind:SharedLib or WindowedApp or ConsoleApp", "system:windows"}
@@ -110,6 +109,7 @@ project "TraceViewer"
 -- NOTE: the library link order is sensitive because of linux linker fuckery
 	kind "WindowedApp"
 	files { "TraceViewer.cpp" }
+	files {"premake5.lua", "README.md", "LICENSE.txt"}
 	includedirs {
 		"imgui/examples/libs/gl3w",
 		"mio/include"

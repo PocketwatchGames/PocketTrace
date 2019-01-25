@@ -124,6 +124,21 @@ the call overhead even more.
 
 ### 5) OTHER MACROs
 
+```TRACE_INCLUDE_FIRST``` If defined the TraceProfiler.h header will include the defined file. Example
+
+```c++
+#define TRACE_INCLUDE_FIRST "MyHeader.h"
+```
+
+```TRACE_ASSERT(x)``` You can define ```TRACE_ASSERT``` globally to have the profiler use your ASSERT macro.
+
+```TRACE_VERIFY(x)``` You can define ```TRACE_VERIFY``` globally to have the profiler use your ASSERT macro. 
+```TRACE_VERFIY``` is intended to be present in both debug and non-debug builds whereas 
+```TRACE_ASSERT``` is intended to be only present in debug builds.
+
+If you don't define ```TRACE_ASSERT``` or ```TRACE_VERIFY``` then the TraceProfiler.cpp will use ```<assert.h>```
+however, the header TraceProfiler.h will just not use the macros at all (as to not pollute public code with ```<assert.h>```).
+
 ```c++
 TRBLOCK(_label)
 
