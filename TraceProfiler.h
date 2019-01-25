@@ -2,7 +2,11 @@
 
 #pragma once
 
-#if defined(TRACE_PROFILER)
+#if defined(TRACE_PROFILER) || defined(BUILDING_TRACE_PROFILER)
+
+#ifdef TRACE_INCLUDE_FIRST
+#include TRACE_INCLUDE_FIRST
+#endif
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -11,22 +15,43 @@
 #include <stdint.h>
 #include <atomic>
 
+#ifndef TRACE_ASSERT
+#define __TRACE_DEFINED_ASSERT
+#define TRACE_ASSERT(_x)
+#endif
+
 #ifdef _MSC_VER
 #include <intrin.h>
 #define THREAD_LOCAL __declspec(thread)
+#ifdef TRACE_DLL
+#define TRACE_DLL_EXPORT __declspec(dllexport)
+#define TRACE_DLL_IMPORT __declspec(dllimport)
+#else
+#define TRACE_DLL_IMPORT
+#define TRACE_DLL_EXPORT
+#endif
+#else
+#define TRACE_DLL_IMPORT
+#define TRACE_DLL_EXPORT
+#endif
+
+#ifdef BUILDING_TRACE_PROFILER
+#define TRACE_API TRACE_DLL_EXPORT
+#else
+#define TRACE_API TRACE_DLL_IMPORT
 #endif
 
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
 
-#ifndef HAVE_CRCSTR // for pocketwatch code
+#define TRACE_RDTSC() __rdtsc()
 
-class NotCopyable {
+class TraceNotCopyable {
 public:
-	NotCopyable() = default;
-	NotCopyable(const NotCopyable&) = delete;
-	NotCopyable& operator = (const NotCopyable&) = delete;
+	TraceNotCopyable() = default;
+	TraceNotCopyable(const TraceNotCopyable&) = delete;
+	TraceNotCopyable& operator = (const TraceNotCopyable&) = delete;
 };
 
 /*
@@ -69,7 +94,7 @@ Compile Time CRC32, adapted from:
 =======================================
 */
 
-static constexpr uint32_t crc_tab32[256] = {
+static constexpr uint32_t trace_crc_tab32[256] = {
 	0x00000000ul,
 	0x77073096ul,
 	0xEE0E612Cul,
@@ -328,43 +353,35 @@ static constexpr uint32_t crc_tab32[256] = {
 	0x2D02EF8Dul
 };
 
-/*
-* uint32_t crc_32( const char *input_str, size_t num_bytes );
-*
-* The function crc_32() calculates in one pass the common 32 bit CRC value for
-* a byte string that is passed to the function together with a parameter
-* indicating the length.
-*/
-
-constexpr uint32_t crc_32_constexpr(const char *input_str, size_t num_bytes) {
+constexpr uint32_t trace_crc_32_constexpr(const char *input_str, size_t num_bytes) {
 
 	uint32_t crc = 0xFFFFFFFFul;
 	const char *ptr = input_str;
 
 	for (size_t a = 0; a < num_bytes; a++) {
 
-		crc = (crc >> 8) ^ crc_tab32[(crc ^ (uint32_t)*ptr++) & 0x000000FFul];
+		crc = (crc >> 8) ^ trace_crc_tab32[(crc ^ (uint32_t)*ptr++) & 0x000000FFul];
 	}
 
 	return (crc ^ 0xFFFFFFFFul);
 
 }
 
-uint32_t crc_str_32(const char* str);
+uint32_t trace_crc_str_32(const char* str);
 
 /*
 ===============================================================================
-crcstr_t, crcname_t
+trace_crcstr_t, crcname_t
 
 These are workhorse classes for easy-to-use compile time CRCs in game code.
 
-crcstr_t keeps a const char* to the originating string which works for static 
-string data. Or data that does not relocate while it is referenced by a crcstr_t.
+trace_crcstr_t keeps a const char* to the originating string which works for static 
+string data. Or data that does not relocate while it is referenced by a trace_crcstr_t.
 
 If you want to CRC data that is loaded at runtime using temporary buffers then use 
 a crcname_t which has an enough internal storage to keep the first 32 characters 
 including the null terminator and will allow debugger inspection of the string
-data. crcname_t can also work like crcstr_t for static string data that is crc'ed
+data. crcname_t can also work like trace_crcstr_t for static string data that is crc'ed
 at compile time (without the 32 character limit).
 
 When BARE_CRCNAME is defined, then crcname_t will no longer have a reference to
@@ -372,45 +389,45 @@ any string data.
 ===============================================================================
 */
 
-static const struct crc_runtime_tag_t {} crc_runtime_tag;
-static const struct crc_null_tag_t {} crc_null_tag;
+static const struct trace_crc_runtime_tag_t {} trace_crc_runtime_tag;
+static const struct trace_crc_null_tag_t {} trace_crc_null_tag;
 
-// crcstr_t can only be used for static string data
+// trace_crcstr_t can only be used for static string data
 // or data that doesn't move for as long as it is
-// referenced by a crcstr_t.
+// referenced by a trace_crcstr_t.
 
-struct crcstr_t {
-	typedef void (crcstr_t::*bool_type)();
+struct trace_crcstr_t {
+	typedef void (trace_crcstr_t::*bool_type)();
 
-	constexpr crcstr_t() : crc(), str() {}
-	constexpr crcstr_t(const crcstr_t&) = default;
-	constexpr crcstr_t(const char* s, uint32_t c) : str(s), crc(c) {}
-	crcstr_t(const char* arr, const crc_runtime_tag_t&) : crcstr_t(arr, crc_str_32(arr)) {}
-	explicit constexpr crcstr_t(const crc_null_tag_t&) : crc(0), str(nullptr) {}
+	constexpr trace_crcstr_t() : crc(), str() {}
+	constexpr trace_crcstr_t(const trace_crcstr_t&) = default;
+	constexpr trace_crcstr_t(const char* s, uint32_t c) : str(s), crc(c) {}
+	trace_crcstr_t(const char* arr, const trace_crc_runtime_tag_t&) : trace_crcstr_t(arr, trace_crc_str_32(arr)) {}
+	explicit constexpr trace_crcstr_t(const trace_crc_null_tag_t&) : crc(0), str(nullptr) {}
 
 	template <size_t N>
-	constexpr crcstr_t(const char(&arr)[N]) : str(arr), crc(crc_32_constexpr(arr, N - 1)) {}
+	constexpr trace_crcstr_t(const char(&arr)[N]) : str(arr), crc(trace_crc_32_constexpr(arr, N - 1)) {}
 		
-	crcstr_t& operator = (const crcstr_t& s) {
+	trace_crcstr_t& operator = (const trace_crcstr_t& s) {
 		*const_cast<const char**>(&str) = s.str;
 		*const_cast<uint32_t*>(&crc) = s.crc;
 		return *this;
 	}
 
-	bool operator == (const crcstr_t& s) const {
+	bool operator == (const trace_crcstr_t& s) const {
 		return crc == s.crc;
 	}
 
-	bool operator != (const crcstr_t& s) const {
+	bool operator != (const trace_crcstr_t& s) const {
 		return crc != s.crc;
 	}
 
-	bool operator < (const crcstr_t& s) const {
+	bool operator < (const trace_crcstr_t& s) const {
 		return crc < s.crc;
 	}
 
 	operator bool_type() const {
-		return crc ? &crcstr_t::boolfn : nullptr;
+		return crc ? &trace_crcstr_t::boolfn : nullptr;
 	}
 
 	const char* const str;
@@ -419,15 +436,11 @@ private:
 	void boolfn() {}
 };
 
-static constexpr crcstr_t crcstr_null(crc_null_tag);
-
-#endif
-
-#define TRACE_RDTSC() __rdtsc()
+static constexpr trace_crcstr_t trace_crcstr_null(trace_crc_null_tag);
 
 struct TraceBlock_t {
-	crcstr_t label;
-	crcstr_t location;
+	trace_crcstr_t label;
+	trace_crcstr_t location;
 	uint64_t start;
 	uint64_t end;
 	int parent;
@@ -448,16 +461,16 @@ struct TraceThread_t {
 
 #define TRACE_GROW_SIZE (1024*1024)
 
-TraceThread_t* TraceThreadGrow();
-void TraceInit(const char* path);
-void TraceBeginThread(const char* name, uint32_t id);
-void TraceEndThread();
-void TraceWriteBlocks();
-void TraceShutdown();
-uint32_t TraceGetCurrentThreadID();
+TRACE_API TraceThread_t* TraceThreadGrow();
+TRACE_API void TraceInit(const char* path);
+TRACE_API void TraceBeginThread(const char* name, uint32_t id);
+TRACE_API void TraceEndThread();
+TRACE_API void TraceWriteBlocks();
+TRACE_API void TraceShutdown();
+TRACE_API uint32_t TraceGetCurrentThreadID();
 
 #define __TRACEPUSHFN(_linkage, _name) \
-_linkage void _name(crcstr_t label, crcstr_t location) { \
+_linkage void _name(trace_crcstr_t label, trace_crcstr_t location) { \
 	auto thread = __tr_thread; \
 	auto index = thread->numblocks; \
 	if (index + 1 >= thread->maxblocks) {\
@@ -476,25 +489,27 @@ _linkage void _name(crcstr_t label, crcstr_t location) { \
 #define __TRACEPOPFN(_linkage, _name) \
 _linkage void _name() {\
 	auto thread = __tr_thread;\
-	ASSERT(thread->stack >= 0);\
-	ASSERT(thread->stack < thread->numblocks);\
+	TRACE_ASSERT(thread->stack >= 0);\
+	TRACE_ASSERT(thread->stack < thread->numblocks);\
 	auto& block = thread->blocks[thread->stack];\
 	thread->stack = block.parent;\
 	block.end = TRACE_RDTSC();\
 }
 
 #ifdef TRACE_INLINE
-extern THREAD_LOCAL TraceThread_t* __tr_thread;
+extern TRACE_API THREAD_LOCAL TraceThread_t* __tr_thread;
 __TRACEPUSHFN(inline, __TracePushInline)
 __TRACEPOPFN(inline, __TracePopInline)
 #define __TRACEPUSHFNNAME __TracePushInline
 #define __TRACEPOPFNNAME __TracePopInline
 #else
-void __TracePush(crcstr_t label, crcstr_t location);
-void __TracePop();
+TRACE_API void __TracePush(trace_crcstr_t label, trace_crcstr_t location);
+TRACE_API void __TracePop();
+#define __TRACEPUSHFNNAME __TracePush
+#define __TRACEPOPFNNAME __TracePop
 #endif
 
-struct __TR_BLOCKS {
+struct __TR_BLOCKS : TraceNotCopyable {
 	int count;
 
 	~__TR_BLOCKS() {
@@ -504,7 +519,7 @@ struct __TR_BLOCKS {
 	}
 };
 
-struct __TR_BLOCKPOP : NotCopyable {
+struct __TR_BLOCKPOP : TraceNotCopyable {
 	__TR_BLOCKPOP(__TR_BLOCKS* blocks) : _blocks(blocks) {}
 	~__TR_BLOCKPOP() {
 		--_blocks->count;
@@ -515,7 +530,7 @@ private:
 	__TR_BLOCKS* _blocks;
 };
 
-struct __TR_THREADPOP {
+struct __TR_THREADPOP : TraceNotCopyable {
 	~__TR_THREADPOP() {
 		TraceEndThread();
 	}
@@ -523,8 +538,8 @@ struct __TR_THREADPOP {
 
 #define __TRPUSH(_label, _location) \
 	{ ++__tr_blocks.count;\
-		static constexpr crcstr_t crclabel(_label);\
-		static constexpr crcstr_t crclocation(_location);\
+		static constexpr trace_crcstr_t crclabel(_label);\
+		static constexpr trace_crcstr_t crclocation(_location);\
 		__TRACEPUSHFNNAME(crclabel, crclocation); \
 	} ((void)0)
 
@@ -552,6 +567,11 @@ struct __TR_THREADPOP {
 #define TRTHREADPROC(_name) \
 	__TR_THREADPOP __tr_pop; \
 	TraceBeginThread(_name, TraceGetCurrentThreadID())
+
+#ifdef __TRACE_DEFINED_ASSERT
+#undef __TRACE_DEFINED_ASSERT
+#undef TRACE_ASSERT
+#endif
 
 #else
 

@@ -1,6 +1,6 @@
 // Copyright (c) 2019 Pocketwatch Games, LLC.
 
-#if defined(TRACE_PROFILER)
+#if defined(TRACE_PROFILER) || defined(BUILDING_TRACE_PROFILER)
 
 #include "TraceProfiler.h"
 
@@ -48,13 +48,13 @@
 #endif
 #endif
 
-uint32_t crc_str_32(const char* str) {
+uint32_t trace_crc_str_32(const char* str) {
 	uint32_t crc;
 
 	crc = 0xFFFFFFFFul;
 
 	while (*str != 0) {
-		crc = (crc >> 8) ^ crc_tab32[(crc ^ (uint32_t)*str++) & 0x000000FFul];
+		crc = (crc >> 8) ^ trace_crc_tab32[(crc ^ (uint32_t)*str++) & 0x000000FFul];
 	}
 
 	return (crc ^ 0xFFFFFFFFul);
@@ -317,5 +317,9 @@ void TraceShutdown() {
 		thread.join();
 	}
 }
+
+#define TRACE_NULL_API
+__TRACEPUSHFN(TRACE_NULL_API, __TracePush)
+__TRACEPOPFN(TRACE_NULL_API, __TracePop)
 
 #endif

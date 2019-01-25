@@ -54,7 +54,7 @@ filter "configurations:Release"
 	defines {"NDEBUG"}
 	runtime "Release"
 	editandcontinue "Off"
-	optimize "Full"
+	optimize "Speed"
 	flags {"LinkTimeOptimization", "NoIncrementalLink", "NoMinimalRebuild"}
 filter {"toolset:gcc or clang"}
 	removeflags {"FatalWarnings"}
