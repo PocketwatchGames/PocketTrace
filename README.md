@@ -1,4 +1,4 @@
-# PocketTrace Guide
+# PocketTrace
 
 ![PocketTrace Viewer](pocketrace.png)
 
