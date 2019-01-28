@@ -1154,7 +1154,7 @@ int main(int, char**) {
 			s_timeScaleIndex = 10;
 			SetTimeScale(10, 0);
 
-			OpenTraceFile("F:\\Projects\\Dracarys5\\Temp\\Traces\\trace_00000.Main.19228.trace");
+			//OpenTraceFile("F:\\Projects\\Dracarys5\\Temp\\Traces\\trace_00000.Main.19228.trace");
 		}
 
 		// 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
