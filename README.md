@@ -106,11 +106,13 @@ int main(int argc, const char** argv) {
 }
 ```
 
-```TRACE_WRITEBLOCKS()``` is something you should call at regular intervals. It is a very lightweight call and
-simply does an atomic update of the trace block counter that is available for writting, which is used by
-background threads of the trace profiler. This isn't _required_ but it does let the profiler flush data to
-disk as it is being generated which means the app will exit quickly instead of having to wait while 100s of mbs
-of data is flushed to disk at the end.
+```TRACE_WRITEBLOCKS()``` is something you should call at regular intervals inside root level
+functions only or long running stack frames (otherwise you may get incorrect timing data in the data). The
+threaded writes on the profiler backend expect that when TRACE_WRITEBLOCKS is called the current stack frame 
+is essentially persistant. It is a very lightweight call and simply does an atomic update of the trace block 
+counter that is available for writting, which is used by background threads of the trace profiler. This isn't 
+_required_ but it does let the profiler flush data to disk as it is being generated which means the app will 
+exit quickly instead of having to wait while 100s of mbs of data is flushed to disk at the end.
 
 ### 4) Profiling Overhead
 

@@ -42,6 +42,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #define ftello64 _ftelli64
+#define fseeko64 _fseeki64
 #undef max
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -81,9 +82,11 @@ inline uint64_t GetRelativeMicros(uint64_t tsc) {
 	return ((tsc - s_tscStart) / s_ticksPerMicro);
 }
 
-void TraceWriteBlocks() {
+void TraceWriteBlocks(int reset) {
 	auto thread = __tr_thread;
-	thread->writeblocks.store(thread->numblocks, std::memory_order_release);
+	if (thread->reset >= reset) {
+		thread->writeblocks.store(thread->numblocks, std::memory_order_release);
+	}
 }
 
 TraceThread_t* TraceThreadGrow() {
@@ -92,6 +95,7 @@ TraceThread_t* TraceThreadGrow() {
 	if (!thread) {
 		thread = (TraceThread_t*)malloc(sizeof(TraceThread_t) + sizeof(TraceBlock_t) * (TRACE_GROW_SIZE - 1));
 		thread->realloced = nullptr;
+		thread->reset = 0;
 		thread->maxblocks = TRACE_GROW_SIZE;
 		thread->writeblocks.store(0, std::memory_order_relaxed);
 		__tr_thread = thread;
@@ -119,7 +123,10 @@ static void AddBlockToIndex(int blocknum, uint64_t start, uint64_t end, std::vec
 	}
 
 	for (auto i = start_index; i <= end_index; ++i) {
-		index[i].push_back(blocknum);
+		const auto pos = std::lower_bound(index[i].begin(), index[i].end(), blocknum);
+		if ((pos == index[i].end()) || (*pos != blocknum)) {
+			index[i].insert(pos, blocknum);
+		}
 	}
 }
 
@@ -129,6 +136,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 	
 	struct {
 		uint32_t magic;
+		uint32_t version;
 		int numstacks;
 		int numblocks;
 		int numindexblocks;
@@ -141,9 +149,25 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 		uint64_t timebase;
 	} header;
 
+	struct {
+		uint64_t start;
+		uint64_t end;
+		uint64_t childTime;
+		uint32_t stackframe;
+		int parent;
+		int numparents;
+	} file_block;
+
 	struct StackFrame_t {
 		char label[256];
 		char location[256];
+		uint64_t wallTime;
+		uint64_t childTime;
+		uint64_t callCount;
+		uint64_t bestCallTime;
+		uint64_t worstCallTime;
+		int bestcall;
+		int worstcall;
 	};
 	
 	memset(&header, 0, sizeof(header));
@@ -152,6 +176,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 	std::vector<std::vector<int>> index;
 	std::vector<StackFrame_t> stackFrames;
 	std::vector<uint32_t> stackFrameIDs;
+	std::vector<int> rewriteBlocks;
 	
 	for (;;) {
 		const auto numblocks = thread->writeblocks.load(std::memory_order_acquire);
@@ -162,25 +187,26 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 			free(old);
 			continue;
 		} else if (curblock < numblocks) {
-			struct {
-				uint32_t stackframe;
-				uint64_t start;
-				uint64_t end;
-				int parent;
-				int numparents;
-			} file_block;
-
+			
 			for (; curblock < numblocks; ++curblock) {
 				const auto& block = thread->blocks[curblock];
+				memset(&file_block, 0, sizeof(file_block));
 
 				file_block.stackframe = block.location.crc;
 				file_block.start = GetRelativeMicros(block.start);
 				file_block.end = block.end ? GetRelativeMicros(block.end) : 0;
 				file_block.parent = block.parent;
-				file_block.numparents = 0;
+				
+				if (file_block.end) {
+					file_block.childTime = block.childTime;
+				} else {
+					// this block is currently unterminated and will not
+					// have correct timing counts in child stack frames.
+					rewriteBlocks.push_back(curblock);
+				}
 
-				TRACE_ASSERT(block.parent < curblock);
 				for (auto parent = block.parent; parent != -1; parent = thread->blocks[parent].parent) {
+					TRACE_ASSERT(parent < curblock);
 					++file_block.numparents;
 				}
 
@@ -188,21 +214,56 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 
 				fwrite(&file_block, sizeof(file_block), 1, fp);
 
-				if (block.end) {
+				if (file_block.end) {
 					AddBlockToIndex(curblock, file_block.start, file_block.end, index);
 				}
 
-				const auto pos = std::lower_bound(stackFrameIDs.begin(), stackFrameIDs.end(), file_block.stackframe);
-				if ((pos == stackFrameIDs.end()) || (*pos != file_block.stackframe)) {
-					const auto idx = pos - stackFrameIDs.begin();
-					stackFrameIDs.insert(pos, file_block.stackframe);
-					
-					StackFrame_t frame;
-					memset(&frame, 0, sizeof(frame));
-					strcpy_s(frame.label, block.label.str);
-					strcpy_s(frame.location, block.location.str);
+				{
+					const auto pos = std::lower_bound(stackFrameIDs.begin(), stackFrameIDs.end(), file_block.stackframe);
+					if ((pos == stackFrameIDs.end()) || (*pos != file_block.stackframe)) {
+						const auto idx = pos - stackFrameIDs.begin();
+						stackFrameIDs.insert(pos, file_block.stackframe);
 
-					stackFrames.insert(idx + stackFrames.begin(), frame);
+						StackFrame_t frame;
+						memset(&frame, 0, sizeof(frame));
+						strcpy_s(frame.label, block.label.str);
+						strcpy_s(frame.location, block.location.str);
+						frame.callCount = 1;
+						frame.wallTime = file_block.end ? file_block.end - file_block.start : 0;
+						frame.bestCallTime = frame.wallTime;
+						frame.worstCallTime = frame.wallTime;
+						frame.bestcall = curblock;
+						frame.worstcall = curblock;
+						stackFrames.insert(idx + stackFrames.begin(), frame);
+					} else {
+						const auto idx = pos - stackFrameIDs.begin();
+						auto& stackFrame = stackFrames[idx];
+						++stackFrame.callCount;
+						if (file_block.end) {
+							const auto wallTime = file_block.end - file_block.start;
+							stackFrame.wallTime += wallTime;
+							if (wallTime < stackFrame.bestCallTime) {
+								stackFrame.bestCallTime = wallTime;
+								stackFrame.bestcall = curblock;
+							}
+							if (wallTime > stackFrame.worstCallTime) {
+								stackFrame.worstCallTime = wallTime;
+								stackFrame.worstcall = curblock;
+							}
+						}
+					}
+				}
+
+				if (file_block.end) {
+					if (block.parent != -1) {
+						const auto& parentBlock = thread->blocks[block.parent];
+						const auto stackpos = std::lower_bound(stackFrameIDs.begin(), stackFrameIDs.end(), parentBlock.location.crc);
+						TRACE_ASSERT(stackpos != stackFrameIDs.end());
+						TRACE_ASSERT(*stackpos == parentBlock.location.crc);
+						const auto idx = stackpos - stackFrameIDs.begin();
+						auto& stackFrame = stackFrames[idx];
+						stackFrame.childTime += file_block.end - file_block.start;
+					}
 				}
 			}
 
@@ -216,6 +277,67 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 	}
 
 	const uint64_t stackOfs = ftello64(fp);
+
+	// rewrite blocks!
+	for (const auto blocknum : rewriteBlocks) {
+		const int64_t ofs = sizeof(header) + (blocknum * sizeof(file_block));
+		fseeko64(fp, ofs, SEEK_SET);
+
+		const auto& block = thread->blocks[blocknum];
+
+		TRACE_ASSERT(block.end);
+
+		memset(&file_block, 0, sizeof(file_block));
+		file_block.stackframe = block.location.crc;
+		file_block.start = GetRelativeMicros(block.start);
+		file_block.end = GetRelativeMicros(block.end);
+		file_block.parent = block.parent;
+		file_block.childTime = block.childTime;
+		
+		for (auto parent = block.parent; parent != -1; parent = thread->blocks[parent].parent) {
+			TRACE_ASSERT(parent < curblock);
+			++file_block.numparents;
+		}
+
+		if (file_block.end) {
+			AddBlockToIndex(blocknum, file_block.start, file_block.end, index);
+
+			const auto pos = std::lower_bound(stackFrameIDs.begin(), stackFrameIDs.end(), file_block.stackframe);
+			TRACE_ASSERT(pos != stackFrameIDs.end());
+			TRACE_ASSERT(*pos == file_block.stackframe);
+
+			{
+				const auto idx = pos - stackFrameIDs.begin();
+				auto& stackFrame = stackFrames[idx];
+				
+				const auto wallTime = file_block.end - file_block.start;
+				stackFrame.wallTime += wallTime;
+				if (wallTime < stackFrame.bestCallTime) {
+					stackFrame.bestCallTime = wallTime;
+					stackFrame.bestcall = curblock;
+				}
+				if (wallTime > stackFrame.worstCallTime) {
+					stackFrame.worstCallTime = wallTime;
+					stackFrame.worstcall = curblock;
+				}
+			}
+
+			if (block.parent != -1 ){
+				const auto& parentBlock = thread->blocks[block.parent];
+				const auto stackpos = std::lower_bound(stackFrameIDs.begin(), stackFrameIDs.end(), parentBlock.location.crc);
+				TRACE_ASSERT(stackpos != stackFrameIDs.end());
+				TRACE_ASSERT(*stackpos == parentBlock.location.crc);
+				const auto idx = stackpos - stackFrameIDs.begin();
+				auto& stackFrame = stackFrames[idx];
+				stackFrame.childTime += file_block.end - file_block.start;
+			}
+		}
+
+		fwrite(&file_block, sizeof(file_block), 1, fp);
+	}
+
+	fseeko64(fp, stackOfs, SEEK_SET);
+
 	if (stackFrames.size()) {
 		TRACE_VERIFY(stackFrames.size() == stackFrameIDs.size());
 		fwrite(&stackFrameIDs[0], sizeof(stackFrameIDs[0]), stackFrames.size(), fp);
@@ -234,6 +356,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 	}
 
 	header.magic = TRACE_FOURCC('T', 'R', 'A', 'C');
+	header.version = 1;
 	header.numstacks = (int)stackFrames.size();
 	header.numblocks = thread->writeblocks;
 	header.numindexblocks = (int)index.size();
@@ -249,7 +372,19 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 	free(thread);
 }
 
+void TraceThreadReset(int reset) {
+	auto thread = __tr_thread;
+	if (thread && (thread->reset < reset) && (thread->stack >= 0)) {
+		thread->micro_start = GetMicroseconds();
+		thread->micro_end = 0;
+		thread->reset = reset;
+		thread->numblocks = thread->stack + 1;
+		thread->blocks[thread->stack].childTime = 0;
+	}
+}
+
 void TraceBeginThread(const char* name, uint32_t id) {
+
 	TRACE_ASSERT(!__tr_thread);
 	TRACE_VERIFY(s_init);
 	

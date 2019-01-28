@@ -32,17 +32,26 @@
 #undef min
 #undef max
 
+static SDL_Window* s_window;
 static bool s_generate;
 static float s_ww, s_wh;
 static uint64_t s_minTicks;
-static uint64_t s_maxTicks;
+static uint64_t s_totalTicks;
 static uint64_t s_vpTimeScale;
 static uint64_t s_vpDisjointDT;
 static float s_vpInvTimeScale;
 static std::array<uint64_t, 2> s_vpTimeBounds;
 static std::array<uint64_t, 2> s_oldvpTimeBounds;
 static float s_scrollpos;
+static bool s_inFlameChart;
 static int s_timeScaleIndex;
+
+enum ESetSelectedTab {
+	SELECT_TAB_NONE,
+	SELECT_TAB_FLAME_CHART
+};
+
+static ESetSelectedTab s_setSelectedTab;
 
 static const std::array<uint64_t, 17> TIMESCALES = {
 	1000, // one millisecond
@@ -66,6 +75,12 @@ static const std::array<uint64_t, 17> TIMESCALES = {
 
 static void SetTimeScale(int index, uint64_t fixedTime) {
 	double dtw;
+
+	if (fixedTime > s_minTicks) {
+		fixedTime -= s_minTicks;
+	} else {
+		fixedTime = 0;
+	}
 
 	if (fixedTime > s_vpTimeBounds[0]) {
 		dtw = (fixedTime - s_vpTimeBounds[0]) * s_vpInvTimeScale * s_ww;
@@ -107,8 +122,8 @@ static void SetTimeScale(int index, uint64_t fixedTime) {
 
 	s_vpTimeBounds[1] = s_vpTimeBounds[0] + s_vpTimeScale;
 
-	const auto maxscroll = s_maxTicks * s_vpInvTimeScale * s_ww;
-	s_scrollpos = (float)(s_vpTimeBounds[0] / (double)(s_maxTicks - s_vpTimeScale)) * maxscroll;
+	const auto maxscroll = s_totalTicks * s_vpInvTimeScale * s_ww;
+	s_scrollpos = (float)(s_vpTimeBounds[0] / (double)(s_totalTicks - s_vpTimeScale)) * maxscroll;
 }
 
 static void TimescaleUp(uint64_t fixedTime) {
@@ -128,12 +143,20 @@ static void TimescaleDown(uint64_t fixedTime) {
 struct StackFrame_t {
 	char label[256];
 	char location[256];
+	uint64_t wallTime;
+	uint64_t childTime;
+	uint64_t callCount;
+	uint64_t bestCallTime;
+	uint64_t worstCallTime;
+	int bestcall;
+	int worstcall;
 };
 
 struct TimingRecord_t {
-	uint32_t stackframe;
 	uint64_t start;
 	uint64_t end;
+	uint64_t childtime;
+	uint32_t stackframe;
 	int parent;
 	int numparents;
 };
@@ -182,6 +205,11 @@ struct TraceFile_t {
 
 	std::vector<Span_t>* spans;
 
+	std::vector<int> stacksByWall;
+	std::vector<int> stacksByBest;
+	std::vector<int> stacksByWorst;
+	std::vector<int> stacksBySelf;
+
 	bool collapsed;
 };
 
@@ -195,8 +223,8 @@ struct BuildSpan_t {
 
 static void FlushSpan(const TraceFile_t& trace, const BuildSpan_t& span, std::vector<Span_t>& spans) {
 	if (span.stackframe) {
-		const auto minx = std::max(span.start, s_vpTimeBounds[0]) - s_vpTimeBounds[0];
-		const auto maxx = std::min(span.end, s_vpTimeBounds[1]) - s_vpTimeBounds[0];
+		const auto minx = std::max(span.start - s_minTicks, s_vpTimeBounds[0]) - s_vpTimeBounds[0];
+		const auto maxx = std::min(span.end - s_minTicks, s_vpTimeBounds[1]) - s_vpTimeBounds[0];
 		const auto w = (maxx - minx) * s_vpInvTimeScale * s_ww;
 		if (w > 1) {
 			Span_t drawspan;
@@ -249,13 +277,13 @@ static void GenerateSpans(TraceFile_t& trace) {
 			break;
 		}
 		assert(block.numparents <= trace.maxparents);
-		if ((block.start < s_vpTimeBounds[1]) && (trace.micro_end > s_vpTimeBounds[0])) {
+		if (((block.start - s_minTicks) < s_vpTimeBounds[1]) && ((trace.micro_end - s_minTicks) > s_vpTimeBounds[0])) {
 			AddSpan(trace, buildSpans[block.numparents], block.start, trace.micro_end, block.stackframe, trace.spans[block.numparents]);
 		}
 	}
 
-	const auto indexStart = (int)(s_vpTimeBounds[0] / trace.timebase);
-	const auto indexEnd = std::min((int)(s_vpTimeBounds[1] / trace.timebase), trace.numindexblocks-1);
+	const auto indexStart = (int)((s_vpTimeBounds[0]+ s_minTicks) / trace.timebase);
+	const auto indexEnd = std::min((int)((s_vpTimeBounds[1] + s_minTicks) / trace.timebase), trace.numindexblocks-1);
 
 	const TimingRecord_t* block;
 	if ((indexStart < trace.numindexblocks) && (indexStart <= indexEnd)) {
@@ -265,11 +293,12 @@ static void GenerateSpans(TraceFile_t& trace) {
 			const auto indices = trace.indices[i];
 			for (auto ii = 0; ii < indices->numindices; ++ii) {
 				const auto blockindex = indices->indices[ii];
+				assert(blockindex < trace.numblocks);
 				if (blockindex > lastBlockIndex) {
 					lastBlockIndex = blockindex;
 					block = &trace.blocks[blockindex];
 					assert(block->numparents <= trace.maxparents);
-					if ((block->start < s_vpTimeBounds[1]) && (block->end > s_vpTimeBounds[0])) {
+					if (((block->start - s_minTicks) < s_vpTimeBounds[1]) && ((block->end - s_minTicks) > s_vpTimeBounds[0])) {
 						AddSpan(trace, buildSpans[block->numparents], block->start, block->end, block->stackframe, trace.spans[block->numparents]);
 					}
 				}
@@ -277,15 +306,41 @@ static void GenerateSpans(TraceFile_t& trace) {
 		}
 	}
 
-	for (int i = 0; i < trace.maxparents; ++i) {
+	for (int i = 0; i < trace.maxparents+1; ++i) {
 		FlushSpan(trace, buildSpans[i], trace.spans[i]);
+	}
+}
+
+static void ShowTime(uint64_t time) {
+	s_setSelectedTab = SELECT_TAB_FLAME_CHART;
+	if (time > s_minTicks) {
+		time -= s_minTicks;
+	} else {
+		time = 0;
+	}
+	s_timeScaleIndex = 0;
+	SetTimeScale(0, 0);
+	s_scrollpos = (float)(time / (double)(s_totalTicks - s_vpTimeScale)) * s_totalTicks * s_vpInvTimeScale * s_ww;
+}
+
+static void ShowCall(const TraceFile_t& trace, int callnum) {
+	s_setSelectedTab = SELECT_TAB_FLAME_CHART;
+	ShowTime(trace.blocks[callnum].start);
+}
+
+static void ShowFirstCall(const TraceFile_t& trace, uint32_t stackid) {
+	for (int i = 0; i < trace.numblocks; ++i) {
+		if (trace.blocks[i].stackframe == stackid) {
+			ShowCall(trace, i);
+			return;
+		}
 	}
 }
 
 static void OpenTraceFile(const char* nativePath) {
 	for (auto& tf : s_files) {
 		if (!strcmp(&tf->path[0], nativePath)) {
-			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", "That file is already open.", nullptr);
+			SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", "That file is already open.", s_window);
 			return;
 		}
 	}
@@ -293,12 +348,13 @@ static void OpenTraceFile(const char* nativePath) {
 	std::error_code error;
 	auto mmap = mio::make_mmap_source(nativePath, error);
 	if (error) {
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", "Unable to open file.", nullptr);
+		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", "Unable to open file.", s_window);
 		return;
 	}
 
 	struct header_t {
 		uint32_t magic;
+		uint32_t version;
 		int numstacks;
 		int numblocks;
 		int numindexblocks;
@@ -315,7 +371,12 @@ static void OpenTraceFile(const char* nativePath) {
 	const auto header = (const header_t*)base;
 
 	if (header->magic != FOURCC('T', 'R', 'A', 'C')) {
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", "Bad signature, cannot open file.", nullptr);
+		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", "Bad signature, cannot open file.", s_window);
+		return;
+	}
+
+	if (header->version != 1) {
+		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", "Unsupported file version, cannot open file.", s_window);
 		return;
 	}
 
@@ -348,10 +409,52 @@ static void OpenTraceFile(const char* nativePath) {
 		}
 	}
 
+	for (int i = 0; i < trace.numstacks; ++i) {
+		trace.stacksByWall.push_back(i);
+	}
+
+	trace.stacksByBest = trace.stacksByWall;
+	trace.stacksBySelf = trace.stacksByWall;
+	trace.stacksByWorst = trace.stacksByWall;
+
+	std::sort(trace.stacksByWall.begin(), trace.stacksByWall.end(), [&](int a, int b) {
+		return trace.stackFrames[a].wallTime > trace.stackFrames[b].wallTime;
+	});
+
+	std::sort(trace.stacksBySelf.begin(), trace.stacksBySelf.end(), [&](int a, int b) {
+		const auto aself = (trace.stackFrames[a].wallTime - trace.stackFrames[a].childTime);
+		const auto bself = (trace.stackFrames[b].wallTime - trace.stackFrames[b].childTime);
+		return aself > bself;
+	});
+
+	std::sort(trace.stacksByBest.begin(), trace.stacksByBest.end(), [&](int a, int b) {
+		const auto aavg = (trace.stackFrames[a].wallTime / (double)trace.stackFrames[a].callCount);
+		const auto adelta = trace.stackFrames[a].bestCallTime / aavg;
+		const auto bavg = (trace.stackFrames[b].wallTime / (double)trace.stackFrames[b].callCount);
+		const auto bdelta = trace.stackFrames[b].bestCallTime / bavg;
+		return adelta < bdelta;
+	});
+
+	std::sort(trace.stacksByWorst.begin(), trace.stacksByWorst.end(), [&](int a, int b) {
+		const auto aavg = (trace.stackFrames[a].wallTime / (double)trace.stackFrames[a].callCount);
+		const auto adelta = trace.stackFrames[a].worstCallTime / aavg;
+		const auto bavg = (trace.stackFrames[b].wallTime / (double)trace.stackFrames[b].callCount);
+		const auto bdelta = trace.stackFrames[b].worstCallTime / bavg;
+		return adelta > bdelta;
+	});
+
 	trace.spans = new std::vector<Span_t>[trace.maxparents + 1];
 
-	s_minTicks = std::min(s_minTicks, trace.micro_start);
-	s_maxTicks = std::max(s_maxTicks, trace.micro_end);
+	s_minTicks = trace.micro_start;
+
+	uint64_t maxticks = 0;
+
+	for (auto& tr : s_files) {
+		s_minTicks = std::min(s_minTicks, tr->micro_start);
+		maxticks = std::max(maxticks, tr->micro_end);
+	}
+
+	s_totalTicks = maxticks - s_minTicks;
 	s_generate = true;
 }
 
@@ -473,6 +576,114 @@ static float CustomScrollbar(ImGuiLayoutType direction, float scrollPos, float s
 	return scroll_v;
 }
 
+// Tip: pass a non-visible label (e.g. "##dummy") then you can use the space to draw other text or image.
+// But you need to make sure the ID is unique, e.g. enclose calls in PushID/PopID or use ##unique_id.
+static bool Selectable(const char* label, bool selected, ImGuiSelectableFlags flags, const ImVec2& size_arg, ImU32 color) {
+	ImGuiWindow* window = ImGui::GetCurrentWindow();
+	if (window->SkipItems)
+		return false;
+
+	ImGuiContext& g = *GImGui;
+	const ImGuiStyle& style = g.Style;
+
+	if ((flags & ImGuiSelectableFlags_SpanAllColumns) && window->DC.ColumnsSet) // FIXME-OPT: Avoid if vertically clipped.
+		ImGui::PopClipRect();
+
+	ImGuiID id = window->GetID(label);
+	ImVec2 label_size = ImGui::CalcTextSize(label, NULL, true);
+	ImVec2 size(label_size.x, size_arg.y != 0.0f ? size_arg.y : label_size.y);
+	ImVec2 pos = window->DC.CursorPos;
+	pos.y += window->DC.CurrentLineTextBaseOffset;
+	ImRect bb_inner(pos, pos + size);
+	ImGui::ItemSize(bb_inner);
+
+	// Fill horizontal space.
+	ImVec2 window_padding = window->WindowPadding;
+	float max_x = (flags & ImGuiSelectableFlags_SpanAllColumns) ? ImGui::GetWindowContentRegionMax().x : ImGui::GetContentRegionMax().x;
+	float w_draw = ImMax(label_size.x, window->Pos.x + max_x - window_padding.x - window->DC.CursorPos.x);
+
+	ImVec2 size_draw(w_draw, size_arg.y != 0.0f ? size_arg.y : size.y);
+	ImRect bb(pos, pos + size_draw);
+	bb.Max.x += window_padding.x;
+
+	ImVec2 size_inner(size_arg.x*w_draw, size_arg.y != 0.0f ? size_arg.y : size.y);
+	ImRect bb_inner2(pos, pos + size_inner);
+	//if (size_arg.x == 0.0f)
+	//	bb_inner2.Max.x += window_padding.x;
+
+	// Selectables are tightly packed together, we extend the box to cover spacing between selectable.
+	float spacing_L = (float)(int)(style.ItemSpacing.x * 0.5f);
+	float spacing_U = (float)(int)(style.ItemSpacing.y * 0.5f);
+	float spacing_R = style.ItemSpacing.x - spacing_L;
+	float spacing_D = style.ItemSpacing.y - spacing_U;
+	bb.Min.x -= spacing_L;
+	bb.Min.y -= spacing_U;
+	bb.Max.x += spacing_R;
+	bb.Max.y += spacing_D;
+	if (!ImGui::ItemAdd(bb, id))
+	{
+		if ((flags & ImGuiSelectableFlags_SpanAllColumns) && window->DC.ColumnsSet)
+			ImGui::PushColumnClipRect();
+		return false;
+	}
+
+	// We use NoHoldingActiveID on menus so user can click and _hold_ on a menu then drag to browse child entries
+	ImGuiButtonFlags button_flags = 0;
+	if (flags & ImGuiSelectableFlags_NoHoldingActiveID) button_flags |= ImGuiButtonFlags_NoHoldingActiveID;
+	if (flags & ImGuiSelectableFlags_PressedOnClick) button_flags |= ImGuiButtonFlags_PressedOnClick;
+	if (flags & ImGuiSelectableFlags_PressedOnRelease) button_flags |= ImGuiButtonFlags_PressedOnRelease;
+	if (flags & ImGuiSelectableFlags_Disabled) button_flags |= ImGuiButtonFlags_Disabled;
+	if (flags & ImGuiSelectableFlags_AllowDoubleClick) button_flags |= ImGuiButtonFlags_PressedOnClickRelease | ImGuiButtonFlags_PressedOnDoubleClick;
+	bool hovered, held;
+	bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held, button_flags);
+	if (flags & ImGuiSelectableFlags_Disabled)
+		selected = false;
+
+	// Hovering selectable with mouse updates NavId accordingly so navigation can be resumed with gamepad/keyboard (this doesn't happen on most widgets)
+	if (pressed || hovered)
+		if (!g.NavDisableMouseHover && g.NavWindow == window && g.NavLayer == window->DC.NavLayerCurrent)
+		{
+			g.NavDisableHighlight = true;
+			ImGui::SetNavID(id, window->DC.NavLayerCurrent);
+		}
+	if (pressed)
+		ImGui::MarkItemEdited(id);
+
+	// Render
+	if (hovered || selected)
+	{
+		const ImU32 col = ImGui::GetColorU32((held && hovered) ? ImGuiCol_HeaderActive : hovered ? ImGuiCol_HeaderHovered : ImGuiCol_Header);
+		ImGui::RenderFrame(bb.Min, bb.Max, col, false, 0.0f);
+		ImGui::RenderNavHighlight(bb, id, ImGuiNavHighlightFlags_TypeThin | ImGuiNavHighlightFlags_NoRounding);	
+	}
+
+	ImGui::RenderFrame(bb_inner2.Min, bb_inner2.Max, color, false, 0.0f);
+
+	if ((flags & ImGuiSelectableFlags_SpanAllColumns) && window->DC.ColumnsSet)
+	{
+		ImGui::PushColumnClipRect();
+		bb.Max.x -= (ImGui::GetContentRegionMax().x - max_x);
+	}
+
+	if (flags & ImGuiSelectableFlags_Disabled) ImGui::PushStyleColor(ImGuiCol_Text, g.Style.Colors[ImGuiCol_TextDisabled]);
+	ImGui::RenderTextClipped(bb_inner.Min, bb.Max, label, NULL, &label_size, ImVec2(0.0f, 0.0f));
+	if (flags & ImGuiSelectableFlags_Disabled) ImGui::PopStyleColor();
+
+	// Automatically close popups
+	if (pressed && (window->Flags & ImGuiWindowFlags_Popup) && !(flags & ImGuiSelectableFlags_DontClosePopups) && !(window->DC.ItemFlags & ImGuiItemFlags_SelectableDontClosePopup))
+		ImGui::CloseCurrentPopup();
+	return pressed;
+}
+
+static bool Selectable(const char* label, bool* p_selected, ImGuiSelectableFlags flags, const ImVec2& size_arg, ImU32 color) {
+	if (Selectable(label, *p_selected, flags, size_arg, color))
+	{
+		*p_selected = !*p_selected;
+		return true;
+	}
+	return false;
+}
+
 static void DrawTrace(TraceFile_t& trace) {
 	static constexpr float TRACK_HEIGHT = 30;
 	static constexpr float TRACK_SPACE = 5;
@@ -489,7 +700,7 @@ static void DrawTrace(TraceFile_t& trace) {
 	pos = ImGui::GetCursorPos();
 	size = pos;
 
-	if (CollapseButton(ImGui::GetID("#CLOSE"), ImVec2(screenPos.x + 4 + fontSize * 0.5f, screenPos.y + 2.0f), trace.collapsed)) {
+	if (CollapseButton(ImGui::GetID("#COLLAPSE"), ImVec2(screenPos.x + 4 + fontSize * 0.5f, screenPos.y + 2.0f), trace.collapsed)) {
 		trace.collapsed = !trace.collapsed;
 	}
 	
@@ -531,6 +742,11 @@ static void DrawTrace(TraceFile_t& trace) {
 }
 
 static void DrawFrame(float ww, float wh) {
+//	const auto& io = ImGui::GetIO();
+	const auto& g = *GImGui;
+	const auto& style = ImGui::GetStyle();
+
+	s_inFlameChart = false;
 
 	ImGui::SetNextWindowPos(ImVec2(0, 0));
 	ImGui::SetNextWindowSize(ImVec2(ww, wh));
@@ -539,55 +755,254 @@ static void DrawFrame(float ww, float wh) {
 	ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.1f, 0.1f, 0.1f, 1.f));
 
 	ImGui::Begin("##TraceViewerMain", nullptr, ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoTitleBar);
-
-	ImGui::Spacing();
-	ImGui::Spacing();
-	ImGui::Spacing();
-
-	bool first = true;
-
-	// regenerate spans?
-	if ((s_ww != ww) ||
-		(s_wh != wh) ||
-		(s_oldvpTimeBounds[0] != s_vpTimeBounds[0]) ||
-		(s_oldvpTimeBounds[1] != s_vpTimeBounds[1])) {
-		s_oldvpTimeBounds = s_vpTimeBounds;
-		s_ww = ww;
-		s_wh = wh;
-		s_generate = true;
-	}
-
-	if (s_generate) {
-		s_generate = false;
-		for (auto& trace : s_files) {
-			GenerateSpans(*trace);
-		}
-	}
-
-	{
-		int id = 0;
-		for (auto& trace : s_files) {
-			ImGui::PushID(id++);
-			if (!first) {
-				ImGui::Spacing();
+	if (ImGui::BeginTabBar("Main Tabs")) {
+		if (ImGui::BeginTabItem("Flame Chart", nullptr, (s_setSelectedTab==SELECT_TAB_FLAME_CHART) ? ImGuiTabItemFlags_SetSelected : 0)) {
+			if (s_setSelectedTab == SELECT_TAB_FLAME_CHART) {
+				s_setSelectedTab = SELECT_TAB_NONE;
 			}
-			first = false;
-			DrawTrace(*trace);
-			ImGui::PopID();
+			s_inFlameChart = true;
+
+			ImGui::Spacing();
+			ImGui::Spacing();
+			ImGui::Spacing();
+
+			bool first = true;
+
+			// regenerate spans?
+			if ((s_ww != ww) ||
+				(s_wh != wh) ||
+				(s_oldvpTimeBounds[0] != s_vpTimeBounds[0]) ||
+				(s_oldvpTimeBounds[1] != s_vpTimeBounds[1])) {
+				s_oldvpTimeBounds = s_vpTimeBounds;
+				s_ww = ww;
+				s_wh = wh;
+				s_generate = true;
+			}
+
+			if (s_generate) {
+				s_generate = false;
+				for (auto& trace : s_files) {
+					GenerateSpans(*trace);
+				}
+			}
+
+			{
+				int id = 0;
+				for (auto& trace : s_files) {
+					ImGui::PushID(id++);
+					if (!first) {
+						ImGui::Spacing();
+					}
+					first = false;
+					DrawTrace(*trace);
+					ImGui::PopID();
+				}
+			}
+
+			const auto maxscroll = s_totalTicks * s_vpInvTimeScale * s_ww;
+
+			s_scrollpos = CustomScrollbar(ImGuiLayoutType_Horizontal, s_scrollpos, maxscroll);
+
+			if ((s_totalTicks > s_vpTimeScale) && (maxscroll > s_ww)) {
+				double frac = (double)(s_scrollpos / maxscroll);
+				s_vpTimeBounds[0] = (uint64_t)(frac * (s_totalTicks - s_vpTimeScale));
+				s_vpTimeBounds[1] = s_vpTimeBounds[0] + s_vpTimeScale;
+			} else {
+				s_vpTimeBounds[0] = 0;
+				s_vpTimeBounds[1] = s_vpTimeScale;
+			}
+
+			ImGui::EndTabItem();
 		}
-	}
+		if (ImGui::BeginTabItem("Wall Time")) {
 
-	const auto maxscroll = s_maxTicks * s_vpInvTimeScale * s_ww;
-	
-	s_scrollpos = CustomScrollbar(ImGuiLayoutType_Horizontal, s_scrollpos, maxscroll);
+			if (!s_files.empty()) {
+				const auto numblocks = (int)s_files.size();
+				
+				int numitems = 0;
+				for (auto& trace : s_files) {
+					numitems += trace->numstacks;
+				}
 
-	if ((s_maxTicks > s_vpTimeScale) && (maxscroll > s_ww)) {
-		double frac = (double)(s_scrollpos / maxscroll);
-		s_vpTimeBounds[0] = (uint64_t)(frac * (s_maxTicks - s_vpTimeScale));
-		s_vpTimeBounds[1] = s_vpTimeBounds[0] + s_vpTimeScale;
-	} else {
-		s_vpTimeBounds[0] = 0;
-		s_vpTimeBounds[1] = s_vpTimeScale;
+				const float predictedItemSize = (g.FontSize + style.ItemSpacing.y) * (numblocks + numitems);
+
+				const auto pos = ImGui::GetCursorPosY();
+				const auto space = ImGui::GetContentRegionAvail().y / numblocks;
+
+				int numColumns = 1;
+				if (predictedItemSize > space) {
+					numColumns = std::max((int)(predictedItemSize / space) + 1, 4);
+				}
+
+				for (auto& trace : s_files) {
+					const double total = (double)(trace->micro_end - trace->micro_start);
+
+					Selectable(trace->path, false, ImGuiSelectableFlags_Disabled, ImVec2(1, 0), ImGui::GetColorU32(ImGuiCol_Header));
+
+					ImGui::Columns(numColumns, NULL, false);
+
+					for (int i = 0; i < trace->numstacks; i++) {
+						
+						const auto& stackframe = trace->stackFrames[trace->stacksByWall[i]];
+						const auto rgbmask = (ImU32)(trace->stackFrameIDs[trace->stacksByWall[i]] | 0xFF000000);
+						const auto frac = (float)(stackframe.wallTime / total);
+
+						if (Selectable(stackframe.label, false, 0, ImVec2(frac, 0), rgbmask)) {
+							ShowFirstCall(*trace, trace->stackFrameIDs[trace->stacksByWall[i]]);
+						}
+
+						if ((ImGui::GetCursorPosY() - pos) >= space) {
+							ImGui::NextColumn();
+						}
+					}
+
+					ImGui::Columns(1);
+				}
+			}
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Self Time")) {
+			if (!s_files.empty()) {
+				const auto numblocks = (int)s_files.size();
+
+				int numitems = 0;
+				for (auto& trace : s_files) {
+					numitems += trace->numstacks;
+				}
+
+				const float predictedItemSize = (g.FontSize + style.ItemSpacing.y) * (numblocks + numitems);
+
+				const auto pos = ImGui::GetCursorPosY();
+				const auto space = ImGui::GetContentRegionAvail().y / numblocks;
+
+				int numColumns = 1;
+				if (predictedItemSize > space) {
+					numColumns = std::max((int)(predictedItemSize / space) + 1, 4);
+				}
+
+				for (auto& trace : s_files) {
+					const double total = (double)(trace->micro_end - trace->micro_start);
+
+					Selectable(trace->path, false, ImGuiSelectableFlags_Disabled, ImVec2(1, 0), ImGui::GetColorU32(ImGuiCol_Header));
+
+					ImGui::Columns(numColumns, NULL, false);
+
+					for (int i = 0; i < trace->numstacks; i++) {
+
+						const auto& stackframe = trace->stackFrames[trace->stacksBySelf[i]];
+						const auto rgbmask = (ImU32)(trace->stackFrameIDs[trace->stacksBySelf[i]] | 0xFF000000);
+						const auto frac = (float)((stackframe.wallTime - stackframe.childTime) / total);
+
+						if (Selectable(stackframe.label, false, 0, ImVec2(frac, 0), rgbmask)) {
+							ShowFirstCall(*trace, trace->stackFrameIDs[trace->stacksBySelf[i]]);
+						}
+
+						if ((ImGui::GetCursorPosY() - pos) >= space) {
+							ImGui::NextColumn();
+						}
+					}
+
+					ImGui::Columns(1);
+				}
+			}
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Best vs Avg")) {
+			if (!s_files.empty()) {
+				const auto numblocks = (int)s_files.size();
+
+				int numitems = 0;
+				for (auto& trace : s_files) {
+					numitems += trace->numstacks;
+				}
+
+				const float predictedItemSize = (g.FontSize + style.ItemSpacing.y) * (numblocks + numitems);
+
+				const auto pos = ImGui::GetCursorPosY();
+				const auto space = ImGui::GetContentRegionAvail().y / numblocks;
+
+				int numColumns = 1;
+				if (predictedItemSize > space) {
+					numColumns = std::max((int)(predictedItemSize / space) + 1, 4);
+				}
+
+				for (auto& trace : s_files) {
+					const double total = (double)(trace->micro_end - trace->micro_start);
+
+					Selectable(trace->path, false, ImGuiSelectableFlags_Disabled, ImVec2(1, 0), ImGui::GetColorU32(ImGuiCol_Header));
+
+					ImGui::Columns(numColumns, NULL, false);
+
+					for (int i = 0; i < trace->numstacks; i++) {
+
+						const auto& stackframe = trace->stackFrames[trace->stacksByBest[i]];
+						const auto rgbmask = (ImU32)(trace->stackFrameIDs[trace->stacksByBest[i]] | 0xFF000000);
+						const auto avg = stackframe.wallTime / (double)stackframe.callCount;
+						const auto delta = 1.f-(float)std::min(stackframe.bestCallTime / avg, 1.);
+
+						if (Selectable(stackframe.label, false, 0, ImVec2(delta, 0), rgbmask)) {
+							ShowCall(*trace, stackframe.bestcall);
+						}
+
+						if ((ImGui::GetCursorPosY() - pos) >= space) {
+							ImGui::NextColumn();
+						}
+					}
+
+					ImGui::Columns(1);
+				}
+			}
+			ImGui::EndTabItem();
+		}
+		if (ImGui::BeginTabItem("Worst vs Avg")) {
+			if (!s_files.empty()) {
+				const auto numblocks = (int)s_files.size();
+
+				int numitems = 0;
+				for (auto& trace : s_files) {
+					numitems += trace->numstacks;
+				}
+
+				const float predictedItemSize = (g.FontSize + style.ItemSpacing.y) * (numblocks + numitems);
+
+				const auto pos = ImGui::GetCursorPosY();
+				const auto space = ImGui::GetContentRegionAvail().y / numblocks;
+
+				int numColumns = 1;
+				if (predictedItemSize > space) {
+					numColumns = std::max((int)(predictedItemSize / space) + 1, 4);
+				}
+
+				for (auto& trace : s_files) {
+					const double total = (double)(trace->micro_end - trace->micro_start);
+
+					Selectable(trace->path, false, ImGuiSelectableFlags_Disabled, ImVec2(1, 0), ImGui::GetColorU32(ImGuiCol_Header));
+
+					ImGui::Columns(numColumns, NULL, false);
+
+					for (int i = 0; i < trace->numstacks; i++) {
+
+						const auto& stackframe = trace->stackFrames[trace->stacksByWorst[i]];
+						const auto rgbmask = (ImU32)(trace->stackFrameIDs[trace->stacksByWorst[i]] | 0xFF000000);
+						const auto avg = stackframe.wallTime / (double)stackframe.callCount;
+						const auto delta = (float)std::min(stackframe.worstCallTime / avg, 8.0) / 8.f;
+
+						if (Selectable(stackframe.label, false, 0, ImVec2(delta, 0), rgbmask)) {
+							ShowCall(*trace, stackframe.worstcall);
+						}
+
+						if ((ImGui::GetCursorPosY() - pos) >= space) {
+							ImGui::NextColumn();
+						}
+					}
+
+					ImGui::Columns(1);
+				}
+			}
+			ImGui::EndTabItem();
+		}
+		
+		ImGui::EndTabBar();
 	}
 	
 	ImGui::End();
@@ -626,8 +1041,8 @@ int main(int, char**) {
 	SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
 	SDL_DisplayMode current;
 	SDL_GetCurrentDisplayMode(0, &current);
-	SDL_Window* window = SDL_CreateWindow("PocketTrace Viewer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-	SDL_GLContext gl_context = SDL_GL_CreateContext(window);
+	s_window = SDL_CreateWindow("PocketTrace Viewer", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1280, 720, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+	SDL_GLContext gl_context = SDL_GL_CreateContext(s_window);
 	SDL_GL_SetSwapInterval(1); // Enable vsync
 
 	// Initialize OpenGL loader
@@ -648,7 +1063,7 @@ int main(int, char**) {
 	//ImGui::StyleColorsClassic();
 
 	// Setup Platform/Renderer bindings
-	ImGui_ImplSDL2_InitForOpenGL(window, gl_context);
+	ImGui_ImplSDL2_InitForOpenGL(s_window, gl_context);
 	ImGui_ImplOpenGL3_Init(glsl_version);
 
 	static const ImVec4 clear_color = ImVec4(0.13f, 0.13f, 0.13f, 1.00f);
@@ -669,57 +1084,66 @@ int main(int, char**) {
 		{
 			static bool mmdown = false;
 			static int mx;
+			static float dt;
 
 			ImGui_ImplSDL2_ProcessEvent(&event);
 			if (event.type == SDL_QUIT) {
 				done = true;
-			} else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(window)) {
+			} else if (event.type == SDL_WINDOWEVENT && event.window.event == SDL_WINDOWEVENT_CLOSE && event.window.windowID == SDL_GetWindowID(s_window)) {
 				done = true;
 			} else if (event.type == SDL_DROPFILE) {
 				OpenTraceFile(event.drop.file);
-			} else if ((event.type == SDL_MOUSEBUTTONDOWN) && (event.button.button == SDL_BUTTON_MIDDLE)) {
-				mx = event.button.x;
-				mmdown = true;
-			} else if ((event.type == SDL_MOUSEMOTION) && mmdown) {
-				const auto dx = mx - event.button.x;
-				const auto dt = (dx / s_ww * s_vpTimeScale);
-				const auto maxscroll = s_maxTicks * s_vpInvTimeScale * s_ww;
-
-				if (dt >= 1) {
-					const auto udt = (uint64_t)dt;
-					s_vpTimeBounds[0] += udt;
-					s_vpTimeBounds[1] = s_vpTimeBounds[0] + s_vpTimeScale;
+				s_setSelectedTab = SELECT_TAB_FLAME_CHART;
+			} else if (s_inFlameChart) {
+				if ((event.type == SDL_MOUSEBUTTONDOWN) && (event.button.button == SDL_BUTTON_MIDDLE)) {
 					mx = event.button.x;
-					s_scrollpos = (float)(s_vpTimeBounds[0] / (double)(s_maxTicks - s_vpTimeScale)) * maxscroll;
-				} else if (dt <= -1) {
-					const auto udt = (uint64_t)-dt;
-					if (s_vpTimeBounds[0] > udt) {
-						s_vpTimeBounds[0] -= udt;
-					} else {
-						s_vpTimeBounds[0] = 0;
+					dt = 0;
+					mmdown = true;
+				} else if ((event.type == SDL_MOUSEMOTION) && mmdown) {
+					const auto dx = mx - event.button.x;
+					dt += (dx / s_ww * s_vpTimeScale);
+					const auto maxscroll = s_totalTicks * s_vpInvTimeScale * s_ww;
+
+					if (dt >= 1) {
+						const auto udt = (uint64_t)dt;
+						dt -= (float)udt;
+						s_vpTimeBounds[0] += udt;
+						s_vpTimeBounds[1] = s_vpTimeBounds[0] + s_vpTimeScale;
+						mx = event.button.x;
+						s_scrollpos = (float)(s_vpTimeBounds[0] / (double)(s_totalTicks - s_vpTimeScale)) * maxscroll;
+					} else if (dt <= -1) {
+						const auto udt = (uint64_t)-dt;
+						dt += (float)udt;
+						if (s_vpTimeBounds[0] > udt) {
+							s_vpTimeBounds[0] -= udt;
+						} else {
+							s_vpTimeBounds[0] = 0;
+						}
+						s_vpTimeBounds[1] = s_vpTimeBounds[0] + s_vpTimeScale;
+						mx = event.button.x;
+						s_scrollpos = (float)(s_vpTimeBounds[0] / (double)(s_totalTicks - s_vpTimeScale)) * maxscroll;
 					}
-					s_vpTimeBounds[1] = s_vpTimeBounds[0] + s_vpTimeScale;
-					mx = event.button.x;
-					s_scrollpos = (float)(s_vpTimeBounds[0] / (double)(s_maxTicks - s_vpTimeScale)) * maxscroll;
-				}
-			} else if ((event.type == SDL_MOUSEBUTTONUP) && (event.button.button == SDL_BUTTON_MIDDLE)) {
-				mmdown = false;
-			} else if (event.type == SDL_MOUSEWHEEL) {
-				int x;
-				SDL_GetMouseState(&x, nullptr);
+				} else if ((event.type == SDL_MOUSEBUTTONUP) && (event.button.button == SDL_BUTTON_MIDDLE)) {
+					mmdown = false;
+				} else if (event.type == SDL_MOUSEWHEEL) {
+					int x;
+					SDL_GetMouseState(&x, nullptr);
 
-				const auto time = s_vpTimeBounds[0] + (uint64_t)(x / s_ww * s_vpTimeScale);
-				if (event.wheel.y > 0) {
-					TimescaleDown(time);
-				} else if (event.wheel.y < 0) {
-					TimescaleUp(time);
+					const auto time = s_vpTimeBounds[0] + (uint64_t)(x / s_ww * s_vpTimeScale);
+					if (event.wheel.y > 0) {
+						TimescaleDown(time + s_minTicks);
+					} else if (event.wheel.y < 0) {
+						TimescaleUp(time + s_minTicks);
+					}
 				}
+			} else {
+				mmdown = false;
 			}
 		}
 
 		// Start the Dear ImGui frame
 		ImGui_ImplOpenGL3_NewFrame();
-		ImGui_ImplSDL2_NewFrame(window);
+		ImGui_ImplSDL2_NewFrame(s_window);
 		ImGui::NewFrame();
 
 		if (firstFrame) {
@@ -730,7 +1154,7 @@ int main(int, char**) {
 			s_timeScaleIndex = 10;
 			SetTimeScale(10, 0);
 
-			//OpenTraceFile("F:\\Projects\\Dracarys5\\Temp\\Traces\\trace_00000.Main.5552.trace");
+			OpenTraceFile("F:\\Projects\\Dracarys5\\Temp\\Traces\\trace_00000.Main.19228.trace");
 		}
 
 		// 1. Show the big demo window (Most of the sample code is in ImGui::ShowDemoWindow()! You can browse its code to learn more about Dear ImGui!).
@@ -740,12 +1164,12 @@ int main(int, char**) {
 
 		// Rendering
 		ImGui::Render();
-		SDL_GL_MakeCurrent(window, gl_context);
+		SDL_GL_MakeCurrent(s_window, gl_context);
 		glViewport(0, 0, (int)io.DisplaySize.x, (int)io.DisplaySize.y);
 		glClearColor(clear_color.x, clear_color.y, clear_color.z, clear_color.w);
 		glClear(GL_COLOR_BUFFER_BIT);
 		ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-		SDL_GL_SwapWindow(window);
+		SDL_GL_SwapWindow(s_window);
 	}
 
 	s_files.clear();
@@ -756,7 +1180,7 @@ int main(int, char**) {
 	ImGui::DestroyContext();
 
 	SDL_GL_DeleteContext(gl_context);
-	SDL_DestroyWindow(window);
+	SDL_DestroyWindow(s_window);
 	SDL_Quit();
 
 	return 0;

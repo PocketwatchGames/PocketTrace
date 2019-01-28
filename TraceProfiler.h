@@ -443,6 +443,7 @@ struct TraceBlock_t {
 	trace_crcstr_t location;
 	uint64_t start;
 	uint64_t end;
+	uint64_t childTime;
 	int parent;
 };
 
@@ -455,6 +456,7 @@ struct TraceThread_t {
 	uint32_t id;
 	TraceThread_t* realloced;
 	FILE* fp;
+	int reset;
 	std::atomic_int writeblocks;
 	TraceBlock_t blocks[1];
 };
@@ -465,7 +467,8 @@ TRACE_API TraceThread_t* TraceThreadGrow();
 TRACE_API void TraceInit(const char* path);
 TRACE_API void TraceBeginThread(const char* name, uint32_t id);
 TRACE_API void TraceEndThread();
-TRACE_API void TraceWriteBlocks();
+TRACE_API void TraceThreadReset(int reset);
+TRACE_API void TraceWriteBlocks(int reset);
 TRACE_API void TraceShutdown();
 TRACE_API uint32_t TraceGetCurrentThreadID();
 
@@ -483,6 +486,7 @@ _linkage void _name(trace_crcstr_t label, trace_crcstr_t location) { \
 	block.parent = thread->stack;\
 	thread->stack = index;\
 	block.end = 0;\
+	block.childTime = 0;\
 	block.start = TRACE_RDTSC();\
 }
 
@@ -492,8 +496,13 @@ _linkage void _name() {\
 	TRACE_ASSERT(thread->stack >= 0);\
 	TRACE_ASSERT(thread->stack < thread->numblocks);\
 	auto& block = thread->blocks[thread->stack];\
-	thread->stack = block.parent;\
 	block.end = TRACE_RDTSC();\
+	const auto parentidx = block.parent;\
+	thread->stack = parentidx;\
+	if (parentidx >= 0) {\
+		auto& parent = thread->blocks[parentidx]; \
+		parent.childTime += (block.end-block.start);\
+	}\
 }
 
 #ifdef TRACE_INLINE
@@ -562,11 +571,13 @@ struct __TR_THREADPOP : TraceNotCopyable {
 
 #define TRACE() __TRACE(__FUNCTION__, __FILE__ ":" STRINGIZE(__LINE__))
 
-#define TRACE_WRITEBLOCKS() TraceWriteBlocks()
+#define TRACE_WRITEBLOCKS(_reset) TraceWriteBlocks(_reset)
 
 #define TRTHREADPROC(_name) \
 	__TR_THREADPOP __tr_pop; \
 	TraceBeginThread(_name, TraceGetCurrentThreadID())
+
+#define TRTHREAD_RESET(_reset) TraceThreadReset(_reset) 
 
 #ifdef __TRACE_DEFINED_ASSERT
 #undef __TRACE_DEFINED_ASSERT
@@ -579,6 +590,7 @@ struct __TR_THREADPOP : TraceNotCopyable {
 #define TRLABEL(_label) ((void)0)
 #define TRACE() ((void)0)
 #define TRTHREADPROC(_label) ((void)0)
-#define TRACE_WRITEBLOCKS() ((void)0)
+#define TRACE_WRITEBLOCKS(_reset) ((void)0)
+#define TRCONDITIONAL_RESET_START_TIME() ((void)0)
 
 #endif

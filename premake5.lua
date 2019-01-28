@@ -136,6 +136,7 @@ project "imgui"
 	warnings "High"
 	includedirs {"imgui", "imgui/examples/libs/gl3w", "SDL2/include"}
 	files { 
+		"imgui/*.h",
 		"imgui/imgui.cpp", 
 		"imgui/imgui_demo.cpp", 
 		"imgui/imgui_draw.cpp", 
