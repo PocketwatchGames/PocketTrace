@@ -461,8 +461,6 @@ struct TraceThread_t {
 	TraceBlock_t blocks[1];
 };
 
-#define TRACE_GROW_SIZE (1024*1024)
-
 TRACE_API TraceThread_t* TraceThreadGrow();
 TRACE_API void TraceInit(const char* path);
 TRACE_API void TraceBeginThread(const char* name, uint32_t id);

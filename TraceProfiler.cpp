@@ -3,6 +3,7 @@
 #if defined(TRACE_PROFILER) || defined(BUILDING_TRACE_PROFILER)
 
 #include "TraceProfiler.h"
+#define TRACE_BASE_SIZE (1024*1024*8)
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -93,18 +94,18 @@ TraceThread_t* TraceThreadGrow() {
 	auto thread = __tr_thread;
 
 	if (!thread) {
-		thread = (TraceThread_t*)malloc(sizeof(TraceThread_t) + sizeof(TraceBlock_t) * (TRACE_GROW_SIZE - 1));
+		thread = (TraceThread_t*)malloc(sizeof(TraceThread_t) + sizeof(TraceBlock_t) * (TRACE_BASE_SIZE - 1));
 		thread->realloced = nullptr;
 		thread->reset = 0;
-		thread->maxblocks = TRACE_GROW_SIZE;
+		thread->maxblocks = TRACE_BASE_SIZE;
 		thread->writeblocks.store(0, std::memory_order_relaxed);
 		__tr_thread = thread;
 		return thread;
 	}
 
-	auto grow = (TraceThread_t*)malloc(sizeof(TraceThread_t) + sizeof(TraceBlock_t) * (thread->maxblocks + TRACE_GROW_SIZE - 1));
+	auto grow = (TraceThread_t*)malloc(sizeof(TraceThread_t) + sizeof(TraceBlock_t) * (thread->maxblocks + thread->maxblocks - 1));
 	memcpy(grow, thread, sizeof(TraceThread_t) + sizeof(TraceBlock_t) * (thread->maxblocks - 1));
-	grow->maxblocks += TRACE_GROW_SIZE;
+	grow->maxblocks *= 2;
 
 	thread->realloced = grow;
 	thread->writeblocks.store(-1, std::memory_order_release);
