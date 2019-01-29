@@ -4,7 +4,9 @@
 
 #include "TraceProfiler.h"
 
-#define TRACE_BASE_SIZE (1024*1024*8)
+// Optimized for page size
+// Should occupy 16,385*4 pages
+#define TRACE_BLOCK_SIZE (((1024*1024)+45) * 4)
 
 #ifdef _MSC_VER
 #pragma warning(push)
@@ -135,20 +137,25 @@ TraceThread_t* TraceThreadGrow() {
 	auto thread = __tr_thread;
 
 	if (!thread) {
-		thread = (TraceThread_t*)malloc(sizeof(TraceThread_t) + sizeof(TraceBlock_t) * (TRACE_BASE_SIZE - 1));
-		thread->realloced = nullptr;
+		thread = (TraceThread_t*)malloc(sizeof(TraceThread_t) + sizeof(TraceBlock_t) * (TRACE_BLOCK_SIZE - 1));
+		thread->prev = nullptr;
+		thread->next = nullptr;
 		thread->reset = 0;
-		thread->maxblocks = TRACE_BASE_SIZE;
+		thread->blockbase = 0;
+		thread->maxblocks = TRACE_BLOCK_SIZE;
 		thread->writeblocks.store(0, std::memory_order_relaxed);
 		__tr_thread = thread;
 		return thread;
 	}
 
-	auto grow = (TraceThread_t*)malloc(sizeof(TraceThread_t) + sizeof(TraceBlock_t) * (thread->maxblocks + thread->maxblocks - 1));
-	memcpy(grow, thread, sizeof(TraceThread_t) + sizeof(TraceBlock_t) * (thread->maxblocks - 1));
-	grow->maxblocks *= 2;
+	auto grow = (TraceThread_t*)malloc(sizeof(TraceThread_t) + sizeof(TraceBlock_t) * (TRACE_BLOCK_SIZE - 1));
+	memcpy(grow, thread, sizeof(TraceThread_t));
+	grow->prev = thread;
+	grow->next = nullptr;
+	grow->blockbase = thread->maxblocks;
+	grow->maxblocks = thread->maxblocks + TRACE_BLOCK_SIZE;
 
-	thread->realloced = grow;
+	thread->next = grow;
 	thread->writeblocks.store(-1, std::memory_order_release);
 		
 	__tr_thread = grow;
@@ -236,10 +243,8 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 	for (;;) {
 		const auto numblocks = thread->writeblocks.load(std::memory_order_acquire);
 		if (numblocks == -1) {
-			TRACE_ASSERT(thread->realloced);
-			auto old = thread;
-			thread = thread->realloced;
-			free(old);
+			TRACE_ASSERT(thread->next);
+			thread = thread->next;
 			continue;
 		} else if (curblock < numblocks) {
 			const auto count = numblocks - curblock;
@@ -247,17 +252,17 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 			//trace_DebugWriteLine("--- Begin (%i blocks) ---", count);
 			
 			for (; curblock < numblocks; ++curblock) {
-				const auto& block = thread->blocks[curblock];
+				const auto* block = TraceGetBlockNum(thread, curblock);
 				block_t file_block;
 
-				file_block.stackframe = block.location.crc;
-				file_block.start = GetRelativeMicros(block.start);
-				file_block.end = block.end ? GetRelativeMicros(block.end) : 0;
-				file_block.parent = block.parent;
+				file_block.stackframe = block->location.crc;
+				file_block.start = GetRelativeMicros(block->start);
+				file_block.end = block->end ? GetRelativeMicros(block->end) : 0;
+				file_block.parent = block->parent;
 				file_block.numparents = 0;
 
 				if (file_block.end) {
-					file_block.childTime = block.childTime;
+					file_block.childTime = block->childTime;
 				} else {
 					file_block.childTime = 0;
 					// this block is currently unterminated and will not
@@ -265,7 +270,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 					rewriteBlocks.push_back(curblock);
 				}
 
-				for (auto parent = block.parent; parent != -1; parent = thread->blocks[parent].parent) {
+				for (auto parent = block->parent; parent != -1; parent = TraceGetBlockNum(thread, parent)->parent) {
 					TRACE_ASSERT(parent < curblock);
 					++file_block.numparents;
 				}
@@ -286,8 +291,8 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 
 						StackFrame_t frame;
 						memset(&frame, 0, sizeof(frame));
-						strcpy_s(frame.label, block.label.str);
-						strcpy_s(frame.location, block.location.str);
+						strcpy_s(frame.label, block->label.str);
+						strcpy_s(frame.location, block->location.str);
 						frame.callCount = 1;
 						frame.wallTime = file_block.end ? file_block.end - file_block.start : 0;
 						frame.bestCallTime = frame.wallTime;
@@ -315,11 +320,11 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 				}
 
 				if (file_block.end) {
-					if (block.parent != -1) {
-						const auto& parentBlock = thread->blocks[block.parent];
-						const auto stackpos = std::lower_bound(stackFrameIDs.begin(), stackFrameIDs.end(), parentBlock.location.crc);
+					if (block->parent != -1) {
+						const auto* parentBlock = TraceGetBlockNum(thread, block->parent);
+						const auto stackpos = std::lower_bound(stackFrameIDs.begin(), stackFrameIDs.end(), parentBlock->location.crc);
 						TRACE_ASSERT(stackpos != stackFrameIDs.end());
-						TRACE_ASSERT(*stackpos == parentBlock.location.crc);
+						TRACE_ASSERT(*stackpos == parentBlock->location.crc);
 						const auto idx = stackpos - stackFrameIDs.begin();
 						auto& stackFrame = stackFrames[idx];
 						stackFrame.childTime += file_block.end - file_block.start;
@@ -351,19 +356,19 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 		const int64_t ofs = sizeof(header) + (blocknum * sizeof(block_t));
 		fseeko64(fp, ofs, SEEK_SET);
 
-		const auto& block = thread->blocks[blocknum];
+		const auto* block = TraceGetBlockNum(thread, blocknum);
 
-		TRACE_ASSERT(block.end);
+		TRACE_ASSERT(block->end);
 
 		block_t file_block;
-		file_block.stackframe = block.location.crc;
-		file_block.start = GetRelativeMicros(block.start);
-		file_block.end = GetRelativeMicros(block.end);
-		file_block.parent = block.parent;
-		file_block.childTime = block.childTime;
+		file_block.stackframe = block->location.crc;
+		file_block.start = GetRelativeMicros(block->start);
+		file_block.end = GetRelativeMicros(block->end);
+		file_block.parent = block->parent;
+		file_block.childTime = block->childTime;
 		file_block.numparents = 0;
 		
-		for (auto parent = block.parent; parent != -1; parent = thread->blocks[parent].parent) {
+		for (auto parent = block->parent; parent != -1; parent = TraceGetBlockNum(thread, parent)->parent) {
 			TRACE_ASSERT(parent < curblock);
 			++file_block.numparents;
 		}
@@ -391,11 +396,11 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 				}
 			}
 
-			if (block.parent != -1 ){
-				const auto& parentBlock = thread->blocks[block.parent];
-				const auto stackpos = std::lower_bound(stackFrameIDs.begin(), stackFrameIDs.end(), parentBlock.location.crc);
+			if (block->parent != -1 ){
+				const auto* parentBlock = TraceGetBlockNum(thread, block->parent);
+				const auto stackpos = std::lower_bound(stackFrameIDs.begin(), stackFrameIDs.end(), parentBlock->location.crc);
 				TRACE_ASSERT(stackpos != stackFrameIDs.end());
-				TRACE_ASSERT(*stackpos == parentBlock.location.crc);
+				TRACE_ASSERT(*stackpos == parentBlock->location.crc);
 				const auto idx = stackpos - stackFrameIDs.begin();
 				auto& stackFrame = stackFrames[idx];
 				stackFrame.childTime += file_block.end - file_block.start;
@@ -441,17 +446,21 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 
 	trace_DebugWriteLine("Trace: wrote %i stack frames to [%s].", header.numblocks, thread->path);
 
-	free(thread);
+	TraceThread_t* prev = nullptr;
+	for (; thread; thread = prev) {
+		prev = thread->prev;
+		free(thread);
+	}
 }
 
 void TraceThreadReset(int reset) {
 	auto thread = __tr_thread;
-	if (thread && (thread->reset < reset) && (thread->stack >= 0)) {
+	if (thread && (thread->reset < reset) && (thread->blockbase == 0) && (thread->stack >= 0)) {
 		thread->micro_start = GetMicroseconds();
 		thread->micro_end = 0;
 		thread->reset = reset;
 		thread->numblocks = thread->stack + 1;
-		thread->blocks[thread->stack].childTime = 0;
+		thread->_blocks[thread->stack].childTime = 0;
 	}
 }
 

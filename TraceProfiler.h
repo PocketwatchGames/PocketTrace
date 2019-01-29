@@ -448,18 +448,19 @@ struct TraceBlock_t {
 };
 
 struct TraceThread_t {
+	TraceThread_t* prev, *next;
 	char path[1024];
 	uint64_t micro_start;
 	uint64_t micro_end;
 	int numblocks;
+	int blockbase;
 	int maxblocks;
 	int stack;
 	uint32_t id;
-	TraceThread_t* realloced;
 	FILE* fp;
 	int reset;
 	std::atomic_int writeblocks;
-	TraceBlock_t blocks[1];
+	TraceBlock_t _blocks[1];
 };
 
 TRACE_API TraceThread_t* TraceThreadGrow();
@@ -471,6 +472,13 @@ TRACE_API void TraceWriteBlocks(int reset);
 TRACE_API void TraceShutdown();
 TRACE_API uint32_t TraceGetCurrentThreadID();
 
+inline TraceBlock_t* TraceGetBlockNum(TraceThread_t* thread, int blocknum) {
+	while (blocknum < thread->blockbase) {
+		thread = thread->prev;
+	}
+	return &thread->_blocks[blocknum - thread->blockbase];
+}
+
 #define __TRACEPUSHFN(_linkage, _name) \
 _linkage void _name(trace_crcstr_t label, trace_crcstr_t location) { \
 	auto thread = __tr_thread; \
@@ -479,14 +487,14 @@ _linkage void _name(trace_crcstr_t label, trace_crcstr_t location) { \
 		thread = TraceThreadGrow();\
 	}\
 	thread->numblocks = index + 1;\
-	auto& block = thread->blocks[index];\
-	block.label = label;\
-	block.location = location;\
-	block.parent = thread->stack;\
+	auto block = TraceGetBlockNum(thread, index);\
+	block->label = label;\
+	block->location = location;\
+	block->parent = thread->stack;\
 	thread->stack = index;\
-	block.end = 0;\
-	block.childTime = 0;\
-	block.start = TRACE_RDTSC();\
+	block->end = 0;\
+	block->childTime = 0;\
+	block->start = TRACE_RDTSC();\
 }
 
 #define __TRACEPOPFN(_linkage, _name) \
@@ -494,13 +502,13 @@ _linkage void _name() {\
 	auto thread = __tr_thread;\
 	TRACE_ASSERT(thread->stack >= 0);\
 	TRACE_ASSERT(thread->stack < thread->numblocks);\
-	auto& block = thread->blocks[thread->stack];\
-	block.end = TRACE_RDTSC();\
-	const auto parentidx = block.parent;\
+	auto block = TraceGetBlockNum(thread, thread->stack);\
+	block->end = TRACE_RDTSC();\
+	const auto parentidx = block->parent;\
 	thread->stack = parentidx;\
 	if (parentidx >= 0) {\
-		auto& parent = thread->blocks[parentidx]; \
-		parent.childTime += (block.end-block.start);\
+		auto parent = TraceGetBlockNum(thread, parentidx);\
+		parent->childTime += (block->end-block->start);\
 	}\
 }
 
