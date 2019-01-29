@@ -349,7 +349,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 	for (auto& ii : index) {
 		std::sort(ii.begin(), ii.end());
 	}
-	trace_DebugWriteLine("Rewritting %i block(s)...", (int)rewriteBlocks.size());
+	trace_DebugWriteLine("Rewriting %i block(s)...", (int)rewriteBlocks.size());
 
 	// rewrite blocks!
 	for (const auto blocknum : rewriteBlocks) {
