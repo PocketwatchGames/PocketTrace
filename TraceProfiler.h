@@ -484,7 +484,23 @@ _linkage void _name(trace_crcstr_t label, trace_crcstr_t location) { \
 	auto thread = __tr_thread; \
 	auto index = thread->numblocks; \
 	if (index + 1 >= thread->maxblocks) {\
+		static constexpr trace_crcstr_t crclabel("TraceThreadGrow()");\
+		static constexpr trace_crcstr_t crclocation( __FILE__ ":" STRINGIZE(__LINE__));\
+		auto start = TRACE_RDTSC();\
 		thread = TraceThreadGrow();\
+		auto end = TRACE_RDTSC();\
+		auto block = TraceGetBlockNum(thread, index);\
+		block->label = crclabel;\
+		block->location = crclocation;\
+		block->parent = thread->stack;\
+		block->childTime = 0;\
+		block->start = start;\
+		block->end = end;\
+		if (thread->stack >= 0) {\
+			auto parent = TraceGetBlockNum(thread, thread->stack);\
+			parent->childTime += (end-start);\
+		}\
+		++index;\
 	}\
 	thread->numblocks = index + 1;\
 	auto block = TraceGetBlockNum(thread, index);\

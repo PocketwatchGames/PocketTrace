@@ -857,9 +857,11 @@ static void DrawFrame(float ww, float wh) {
 						const auto rgbmask = (ImU32)(trace->stackFrameIDs[trace->stacksByWall[i]] | 0xFF000000);
 						const auto frac = (float)(stackframe.wallTime / total);
 
+						ImGui::PushID(&stackframe);
 						if (Selectable(stackframe.label, false, 0, ImVec2(frac, 0), rgbmask)) {
 							ShowFirstCall(*trace, trace->stackFrameIDs[trace->stacksByWall[i]]);
 						}
+						ImGui::PopID();
 
 						if ((ImGui::GetCursorPosY() - pos) >= space) {
 							ImGui::NextColumn();
@@ -903,9 +905,11 @@ static void DrawFrame(float ww, float wh) {
 						const auto rgbmask = (ImU32)(trace->stackFrameIDs[trace->stacksBySelf[i]] | 0xFF000000);
 						const auto frac = (float)((stackframe.wallTime - stackframe.childTime) / total);
 
+						ImGui::PushID(&stackframe);
 						if (Selectable(stackframe.label, false, 0, ImVec2(frac, 0), rgbmask)) {
 							ShowFirstCall(*trace, trace->stackFrameIDs[trace->stacksBySelf[i]]);
 						}
+						ImGui::PopID();
 
 						if ((ImGui::GetCursorPosY() - pos) >= space) {
 							ImGui::NextColumn();
@@ -950,9 +954,11 @@ static void DrawFrame(float ww, float wh) {
 						const auto avg = stackframe.wallTime / (double)stackframe.callCount;
 						const auto delta = 1.f-(float)std::min(stackframe.bestCallTime / avg, 1.);
 
+						ImGui::PushID(&stackframe);
 						if (Selectable(stackframe.label, false, 0, ImVec2(delta, 0), rgbmask)) {
 							ShowCall(*trace, stackframe.bestcall);
 						}
+						ImGui::PopID();
 
 						if ((ImGui::GetCursorPosY() - pos) >= space) {
 							ImGui::NextColumn();
@@ -997,9 +1003,11 @@ static void DrawFrame(float ww, float wh) {
 						const auto avg = stackframe.wallTime / (double)stackframe.callCount;
 						const auto delta = (float)std::min(stackframe.worstCallTime / avg, 8.0) / 8.f;
 
+						ImGui::PushID(&stackframe);
 						if (Selectable(stackframe.label, false, 0, ImVec2(delta, 0), rgbmask)) {
 							ShowCall(*trace, stackframe.worstcall);
 						}
+						ImGui::PopID();
 
 						if ((ImGui::GetCursorPosY() - pos) >= space) {
 							ImGui::NextColumn();
