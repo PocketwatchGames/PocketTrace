@@ -3,6 +3,7 @@
 #if defined(TRACE_PROFILER) || defined(BUILDING_TRACE_PROFILER)
 
 #include "TraceProfiler.h"
+
 #define TRACE_BASE_SIZE (1024*1024*8)
 
 #ifdef _MSC_VER
@@ -49,6 +50,46 @@
 #pragma warning(pop)
 #endif
 #endif
+
+static void trace_vDebugWrite(const char* msg, va_list args) {
+#ifdef _MSC_VER
+	auto c = _vscprintf(msg, args);
+	auto buf = (char*)_alloca((size_t)c + 1);
+	vsprintf(buf, msg, args);
+	buf[c] = 0;
+	OutputDebugStringA(buf);
+#else
+	vfprintf(stderr, msg, args);
+#endif
+}
+
+static void trace_DebugWrite(const char* msg, ...) {
+	va_list args;
+	va_start(args, msg);
+	trace_vDebugWrite(msg, args);
+	va_end(args);
+}
+
+static void trace_vDebugWriteLine(const char* msg, va_list args) {
+#ifdef _MSC_VER
+	auto c = _vscprintf(msg, args);
+	auto buf = (char*)_alloca((size_t)c + 2);
+	vsprintf(buf, msg, args);
+	buf[c] = '\n';
+	buf[c + 1] = 0;
+	OutputDebugStringA(buf);
+#else
+	vfprintf(stderr, msg, args);
+	fprintf(stderr, "\n");
+#endif
+}
+
+static void trace_DebugWriteLine(const char* msg, ...) {
+	va_list args;
+	va_start(args, msg);
+	trace_vDebugWriteLine(msg, args);
+	va_end(args);
+}
 
 uint32_t trace_crc_str_32(const char* str) {
 	uint32_t crc;
@@ -115,7 +156,20 @@ TraceThread_t* TraceThreadGrow() {
 	return grow;
 }
 
-static void AddBlockToIndex(int blocknum, uint64_t start, uint64_t end, std::vector<std::vector<int>>& index) {
+static void UnsortedAddBlockToIndex(int blocknum, uint64_t start, uint64_t end, std::vector<std::vector<int>>& index) {
+	uint64_t start_index = start / INDEX_TIMEBASE_IN_MICROS;
+	uint64_t end_index = end / INDEX_TIMEBASE_IN_MICROS;
+
+	if (index.size() <= end_index) {
+		index.resize(end_index + 1);
+	}
+
+	for (auto i = start_index; i <= end_index; ++i) {
+		index[i].push_back(blocknum);
+	}
+}
+
+static void SortedAddBlockToIndex(int blocknum, uint64_t start, uint64_t end, std::vector<std::vector<int>>& index) {
 	uint64_t start_index = start / INDEX_TIMEBASE_IN_MICROS;
 	uint64_t end_index = end / INDEX_TIMEBASE_IN_MICROS;
 
@@ -150,14 +204,14 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 		uint64_t timebase;
 	} header;
 
-	struct {
+	struct block_t {
 		uint64_t start;
 		uint64_t end;
 		uint64_t childTime;
 		uint32_t stackframe;
 		int parent;
 		int numparents;
-	} file_block;
+	};
 
 	struct StackFrame_t {
 		char label[256];
@@ -188,19 +242,24 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 			free(old);
 			continue;
 		} else if (curblock < numblocks) {
+			const auto count = numblocks - curblock;
+
+			//trace_DebugWriteLine("--- Begin (%i blocks) ---", count);
 			
 			for (; curblock < numblocks; ++curblock) {
 				const auto& block = thread->blocks[curblock];
-				memset(&file_block, 0, sizeof(file_block));
+				block_t file_block;
 
 				file_block.stackframe = block.location.crc;
 				file_block.start = GetRelativeMicros(block.start);
 				file_block.end = block.end ? GetRelativeMicros(block.end) : 0;
 				file_block.parent = block.parent;
-				
+				file_block.numparents = 0;
+
 				if (file_block.end) {
 					file_block.childTime = block.childTime;
 				} else {
+					file_block.childTime = 0;
 					// this block is currently unterminated and will not
 					// have correct timing counts in child stack frames.
 					rewriteBlocks.push_back(curblock);
@@ -216,7 +275,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 				fwrite(&file_block, sizeof(file_block), 1, fp);
 
 				if (file_block.end) {
-					AddBlockToIndex(curblock, file_block.start, file_block.end, index);
+					UnsortedAddBlockToIndex(curblock, file_block.start, file_block.end, index);
 				}
 
 				{
@@ -268,32 +327,41 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 				}
 			}
 
+			//trace_DebugWriteLine("--- End (%i blocks) ---", count);
 		} else {
 			if (thread->stack == -2) {
 				break;
 			}
 
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			//trace_DebugWriteLine("Trace: sleeping.");
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
 	}
 
 	const uint64_t stackOfs = ftello64(fp);
 
+	trace_DebugWriteLine("Trace: indexing file [%s]...", thread->path);
+	for (auto& ii : index) {
+		std::sort(ii.begin(), ii.end());
+	}
+	trace_DebugWriteLine("Rewritting %i block(s)...", (int)rewriteBlocks.size());
+
 	// rewrite blocks!
 	for (const auto blocknum : rewriteBlocks) {
-		const int64_t ofs = sizeof(header) + (blocknum * sizeof(file_block));
+		const int64_t ofs = sizeof(header) + (blocknum * sizeof(block_t));
 		fseeko64(fp, ofs, SEEK_SET);
 
 		const auto& block = thread->blocks[blocknum];
 
 		TRACE_ASSERT(block.end);
 
-		memset(&file_block, 0, sizeof(file_block));
+		block_t file_block;
 		file_block.stackframe = block.location.crc;
 		file_block.start = GetRelativeMicros(block.start);
 		file_block.end = GetRelativeMicros(block.end);
 		file_block.parent = block.parent;
 		file_block.childTime = block.childTime;
+		file_block.numparents = 0;
 		
 		for (auto parent = block.parent; parent != -1; parent = thread->blocks[parent].parent) {
 			TRACE_ASSERT(parent < curblock);
@@ -301,7 +369,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 		}
 
 		if (file_block.end) {
-			AddBlockToIndex(blocknum, file_block.start, file_block.end, index);
+			SortedAddBlockToIndex(blocknum, file_block.start, file_block.end, index);
 
 			const auto pos = std::lower_bound(stackFrameIDs.begin(), stackFrameIDs.end(), file_block.stackframe);
 			TRACE_ASSERT(pos != stackFrameIDs.end());
@@ -370,6 +438,9 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 	fwrite(&header, sizeof(header), 1, fp);
 
 	fclose(fp);
+
+	trace_DebugWriteLine("Trace: wrote %i stack frames to [%s].", header.numblocks, thread->path);
+
 	free(thread);
 }
 
@@ -396,11 +467,11 @@ void TraceBeginThread(const char* name, uint32_t id) {
 	thread->micro_start = GetMicroseconds();
 	//thread->tsc_start = TRACE_RDTSC();
 
-	char path[1024];
-	sprintf_s(path, "%s.%s.%u.trace", &s_tracePath[0], name, id);
-	thread->fp = fopen(&path[0], "wb");
+	sprintf_s(thread->path, "%s.%s.%u.trace", &s_tracePath[0], name, id);
+	thread->fp = fopen(thread->path, "wb");
 
 	TRACE_VERIFY(thread->fp);
+	trace_DebugWriteLine("TraceProfiler opened [%s]", thread->path);
 	
 	LOCK L(M);
 	s_writeThreads.push_back(std::thread(TraceThreadWriter, thread));

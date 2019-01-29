@@ -448,6 +448,7 @@ struct TraceBlock_t {
 };
 
 struct TraceThread_t {
+	char path[1024];
 	uint64_t micro_start;
 	uint64_t micro_end;
 	int numblocks;
