@@ -53,7 +53,9 @@ enum ESetSelectedTab {
 
 static ESetSelectedTab s_setSelectedTab;
 
-static const std::array<uint64_t, 17> TIMESCALES = {
+static const std::array<uint64_t, 19> TIMESCALES = {
+	10, // 10 microseconds
+	100, // 100 microseconds
 	1000, // one millisecond
 	2000, // two milliseconds
 	4000, // four milliseconds
@@ -204,7 +206,6 @@ struct TraceFile_t {
 	const IndexBlock_t** indices;
 
 	std::vector<Span_t>* spans;
-
 	std::vector<int> stacksByWall;
 	std::vector<int> stacksByBest;
 	std::vector<int> stacksByWorst;
@@ -318,9 +319,11 @@ static void ShowTime(uint64_t time) {
 	} else {
 		time = 0;
 	}
-	s_timeScaleIndex = 0;
-	SetTimeScale(0, 0);
+	s_timeScaleIndex = 1;
+	SetTimeScale(s_timeScaleIndex, 0);
 	s_scrollpos = (float)(time / (double)(s_totalTicks - s_vpTimeScale)) * s_totalTicks * s_vpInvTimeScale * s_ww;
+	s_vpTimeBounds[0] = time;
+	s_vpTimeBounds[1] = s_vpTimeBounds[0] + s_vpTimeScale;
 }
 
 static void ShowCall(const TraceFile_t& trace, int callnum) {
@@ -801,15 +804,18 @@ static void DrawFrame(float ww, float wh) {
 
 			const auto maxscroll = s_totalTicks * s_vpInvTimeScale * s_ww;
 
-			s_scrollpos = CustomScrollbar(ImGuiLayoutType_Horizontal, s_scrollpos, maxscroll);
+			const auto newscroll = CustomScrollbar(ImGuiLayoutType_Horizontal, s_scrollpos, maxscroll);
 
-			if ((s_totalTicks > s_vpTimeScale) && (maxscroll > s_ww)) {
-				double frac = (double)(s_scrollpos / maxscroll);
-				s_vpTimeBounds[0] = (uint64_t)(frac * (s_totalTicks - s_vpTimeScale));
-				s_vpTimeBounds[1] = s_vpTimeBounds[0] + s_vpTimeScale;
-			} else {
-				s_vpTimeBounds[0] = 0;
-				s_vpTimeBounds[1] = s_vpTimeScale;
+			if (newscroll != s_scrollpos) {
+				s_scrollpos = newscroll;
+				if ((s_totalTicks > s_vpTimeScale) && (maxscroll > s_ww)) {
+					double frac = (double)(s_scrollpos / maxscroll);
+					s_vpTimeBounds[0] = (uint64_t)(frac * (s_totalTicks - s_vpTimeScale));
+					s_vpTimeBounds[1] = s_vpTimeBounds[0] + s_vpTimeScale;
+				} else {
+					s_vpTimeBounds[0] = 0;
+					s_vpTimeBounds[1] = s_vpTimeScale;
+				}
 			}
 
 			ImGui::EndTabItem();
@@ -1084,7 +1090,6 @@ int main(int, char**) {
 		{
 			static bool mmdown = false;
 			static int mx;
-			static float dt;
 
 			ImGui_ImplSDL2_ProcessEvent(&event);
 			if (event.type == SDL_QUIT) {
@@ -1097,23 +1102,20 @@ int main(int, char**) {
 			} else if (s_inFlameChart) {
 				if ((event.type == SDL_MOUSEBUTTONDOWN) && (event.button.button == SDL_BUTTON_MIDDLE)) {
 					mx = event.button.x;
-					dt = 0;
 					mmdown = true;
 				} else if ((event.type == SDL_MOUSEMOTION) && mmdown) {
 					const auto dx = mx - event.button.x;
-					dt += (dx / s_ww * s_vpTimeScale);
 					const auto maxscroll = s_totalTicks * s_vpInvTimeScale * s_ww;
+					auto dt = (dx / s_ww * s_vpTimeScale);
 
 					if (dt >= 1) {
 						const auto udt = (uint64_t)dt;
-						dt -= (float)udt;
 						s_vpTimeBounds[0] += udt;
 						s_vpTimeBounds[1] = s_vpTimeBounds[0] + s_vpTimeScale;
 						mx = event.button.x;
 						s_scrollpos = (float)(s_vpTimeBounds[0] / (double)(s_totalTicks - s_vpTimeScale)) * maxscroll;
 					} else if (dt <= -1) {
 						const auto udt = (uint64_t)-dt;
-						dt += (float)udt;
 						if (s_vpTimeBounds[0] > udt) {
 							s_vpTimeBounds[0] -= udt;
 						} else {
