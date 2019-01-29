@@ -53,9 +53,13 @@ enum ESetSelectedTab {
 
 static ESetSelectedTab s_setSelectedTab;
 
-static const std::array<uint64_t, 19> TIMESCALES = {
+static const std::array<uint64_t, 24> TIMESCALES = {
 	10, // 10 microseconds
+	25, // 25 microseconds
+	50, // 50 microseconds
 	100, // 100 microseconds
+	250, // 256 microseconds
+	500, // 500 microseconds
 	1000, // one millisecond
 	2000, // two milliseconds
 	4000, // four milliseconds
@@ -319,7 +323,7 @@ static void ShowTime(uint64_t time) {
 	} else {
 		time = 0;
 	}
-	s_timeScaleIndex = 1;
+	s_timeScaleIndex = 4;
 	SetTimeScale(s_timeScaleIndex, 0);
 	s_scrollpos = (float)(time / (double)(s_totalTicks - s_vpTimeScale)) * s_totalTicks * s_vpInvTimeScale * s_ww;
 	s_vpTimeBounds[0] = time;
