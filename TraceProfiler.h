@@ -614,6 +614,6 @@ struct __TR_THREADPOP : TraceNotCopyable {
 #define TRACE() ((void)0)
 #define TRTHREADPROC(_label) ((void)0)
 #define TRACE_WRITEBLOCKS(_reset) ((void)0)
-#define TRCONDITIONAL_RESET_START_TIME() ((void)0)
+#define TRTHREAD_RESET(_reset) ((void)0)
 
 #endif
