@@ -41,6 +41,9 @@
 #define TRACE_API TRACE_DLL_IMPORT
 #endif
 
+#define TRACE_STRINGIZE_INTERNAL(_x) #_x
+#define TRACE_STRINGIZE(_x) TRACE_STRINGIZE_INTERNAL(_x)
+
 #ifdef _MSC_VER
 #pragma warning(pop)
 #endif
@@ -485,7 +488,7 @@ _linkage void _name(trace_crcstr_t label, trace_crcstr_t location) { \
 	auto index = thread->numblocks; \
 	if (index + 1 >= thread->maxblocks) {\
 		static constexpr trace_crcstr_t crclabel("TraceThreadGrow()");\
-		static constexpr trace_crcstr_t crclocation( __FILE__ ":" STRINGIZE(__LINE__));\
+		static constexpr trace_crcstr_t crclocation( __FILE__ ":" TRACE_STRINGIZE(__LINE__));\
 		auto start = TRACE_RDTSC();\
 		thread = TraceThreadGrow();\
 		auto end = TRACE_RDTSC();\
@@ -579,20 +582,20 @@ struct __TR_THREADPOP : TraceNotCopyable {
 	if (__tr_blocks.count > 1) {--__tr_blocks.count; __TRACEPOPFNNAME(); }\
 	__TRPUSH(_label, _location)
 
-#define TRLABEL(_label) __TRLABEL(_label, __FILE__ ":" STRINGIZE(__LINE__))
+#define TRLABEL(_label) __TRLABEL(_label, __FILE__ ":" TRACE_STRINGIZE(__LINE__))
 
 #define __TRBLOCK(_label, _location) \
 	__TRPUSH(_label, _location); \
 	__TR_BLOCKPOP __tr_block_pop_##__COUNTER__(&__tr_blocks)
 
-#define TRBLOCK(_label) __TRBLOCK(_label, __FILE__ ":" STRINGIZE(__LINE__))
+#define TRBLOCK(_label) __TRBLOCK(_label, __FILE__ ":" TRACE_STRINGIZE(__LINE__))
 
 #define __TRACE(_label, _location) \
 	__TR_BLOCKS __tr_blocks;\
 	__tr_blocks.count = 0;\
 	__TRPUSH(_label, _location)
 
-#define TRACE() __TRACE(__FUNCTION__, __FILE__ ":" STRINGIZE(__LINE__))
+#define TRACE() __TRACE(__FUNCTION__, __FILE__ ":" TRACE_STRINGIZE(__LINE__))
 
 #define TRACE_WRITEBLOCKS(_reset) TraceWriteBlocks(_reset)
 
