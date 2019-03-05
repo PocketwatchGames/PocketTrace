@@ -35,10 +35,12 @@
 #define TRACE_DLL_EXPORT
 #endif
 
+#ifndef TRACE_API
 #ifdef BUILDING_TRACE_PROFILER
 #define TRACE_API TRACE_DLL_EXPORT
 #else
 #define TRACE_API TRACE_DLL_IMPORT
+#endif
 #endif
 
 #define TRACE_STRINGIZE_INTERNAL(_x) #_x
