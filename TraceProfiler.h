@@ -534,7 +534,7 @@ _linkage void _name() {\
 }
 
 #ifdef TRACE_INLINE
-extern TRACE_API THREAD_LOCAL TraceThread_t* __tr_thread;
+extern THREAD_LOCAL TraceThread_t* __tr_thread;
 __TRACEPUSHFN(inline, __TracePushInline)
 __TRACEPOPFN(inline, __TracePopInline)
 #define __TRACEPUSHFNNAME __TracePushInline
