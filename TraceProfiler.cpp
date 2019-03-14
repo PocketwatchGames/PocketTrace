@@ -200,11 +200,13 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 		uint32_t magic;
 		uint32_t version;
 		int numstacks;
+		int numtags;
 		int numblocks;
 		int numindexblocks;
 		int maxparents;
 		int padd;
 		uint64_t stackofs;
+		uint64_t tagofs;
 		uint64_t indexofs;
 		uint64_t micro_start;
 		uint64_t micro_end;
@@ -216,6 +218,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 		uint64_t end;
 		uint64_t childTime;
 		uint32_t stackframe;
+		uint32_t tag;
 		int parent;
 		int numparents;
 	};
@@ -231,13 +234,19 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 		int bestcall;
 		int worstcall;
 	};
+
+	struct Tag_t {
+		char string[256];
+	};
 	
 	memset(&header, 0, sizeof(header));
 	fwrite(&header, sizeof(header), 1, fp);
 
 	std::vector<std::vector<int>> index;
 	std::vector<StackFrame_t> stackFrames;
+	std::vector<Tag_t> tags;
 	std::vector<uint32_t> stackFrameIDs;
+	std::vector<uint32_t> tagIDs;
 	std::vector<int> rewriteBlocks;
 	
 	for (;;) {
@@ -256,6 +265,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 				block_t file_block;
 
 				file_block.stackframe = block->location.crc;
+				file_block.tag = block->tag ? crc_str_32(block->tag) : 0;
 				file_block.start = GetRelativeMicros(block->start);
 				file_block.end = block->end ? GetRelativeMicros(block->end) : 0;
 				file_block.parent = block->parent;
@@ -319,6 +329,18 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 					}
 				}
 
+				if (block->tag) {
+					const auto pos = std::lower_bound(tagIDs.begin(), tagIDs.end(), file_block.tag);
+					if ((pos == tagIDs.end()) || (*pos != file_block.tag)) {
+						const auto idx = pos - tagIDs.begin();
+						tagIDs.insert(pos, file_block.tag);
+
+						Tag_t t;
+						strcpy_s(t.string, block->tag);
+						tags.insert(idx + tags.begin(), t);
+					}
+				}
+
 				if (file_block.end) {
 					if (block->parent != -1) {
 						const auto* parentBlock = TraceGetBlockNum(thread, block->parent);
@@ -362,6 +384,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 
 		block_t file_block;
 		file_block.stackframe = block->location.crc;
+		file_block.tag = block->tag ? crc_str_32(block->tag) : 0;
 		file_block.start = GetRelativeMicros(block->start);
 		file_block.end = GetRelativeMicros(block->end);
 		file_block.parent = block->parent;
@@ -418,6 +441,14 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 		fwrite(&stackFrames[0], sizeof(stackFrames[0]), stackFrames.size(), fp);
 	}
 
+	const uint64_t tagOfs = ftello64(fp);
+
+	if (tags.size()) {
+		TRACE_VERIFY(tags.size() == tagIDs.size());
+		fwrite(&tagIDs[0], sizeof(tagIDs[0]), tagIDs.size(), fp);
+		fwrite(&tags[0], sizeof(tags[0]), tags.size(), fp);
+	}
+
 	const uint64_t indexOfs = ftello64(fp);
 
 	// write index at end of file
@@ -430,11 +461,13 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 	}
 
 	header.magic = TRACE_FOURCC('T', 'R', 'A', 'C');
-	header.version = 1;
+	header.version = 2;
 	header.numstacks = (int)stackFrames.size();
+	header.numtags = (int)tags.size();
 	header.numblocks = thread->writeblocks;
 	header.numindexblocks = (int)index.size();
 	header.stackofs = stackOfs;
+	header.tagofs = tagOfs;
 	header.indexofs = indexOfs;
 	header.micro_start = thread->micro_start - s_microStart;
 	header.micro_end = thread->micro_end - s_microStart;

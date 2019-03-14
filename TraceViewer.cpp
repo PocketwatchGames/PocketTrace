@@ -158,11 +158,16 @@ struct StackFrame_t {
 	int worstcall;
 };
 
+struct Tag_t {
+	char string[256];
+};
+
 struct TimingRecord_t {
 	uint64_t start;
 	uint64_t end;
 	uint64_t childtime;
 	uint32_t stackframe;
+	uint32_t tag;
 	int parent;
 	int numparents;
 };
@@ -178,6 +183,7 @@ struct Span_t {
 	float x;
 	float w;
 	uint32_t stackindex;
+	uint32_t tagindex;
 };
 
 struct TraceFile_t {
@@ -197,6 +203,7 @@ struct TraceFile_t {
 	mio::mmap_source mmap;
 
 	int numstacks;
+	int numtags;
 	int numblocks;
 	int numindexblocks;
 	int maxparents;
@@ -205,8 +212,10 @@ struct TraceFile_t {
 	uint64_t timebase;
 
 	const uint32_t* stackFrameIDs;
+	const uint32_t* tagIDs;
 	const TimingRecord_t* blocks;
 	const StackFrame_t* stackFrames;
+	const Tag_t* tags;
 	const IndexBlock_t** indices;
 
 	std::vector<Span_t>* spans;
@@ -224,6 +233,7 @@ struct BuildSpan_t {
 	uint64_t start;
 	uint64_t end;
 	uint32_t stackframe;
+	uint32_t tag;
 };
 
 static void FlushSpan(const TraceFile_t& trace, const BuildSpan_t& span, std::vector<Span_t>& spans) {
@@ -241,18 +251,28 @@ static void FlushSpan(const TraceFile_t& trace, const BuildSpan_t& span, std::ve
 			const auto pos = std::lower_bound(trace.stackFrameIDs, trace.stackFrameIDs + trace.numstacks, span.stackframe);
 			if ((pos != (trace.stackFrameIDs + trace.numstacks)) && (*pos == span.stackframe)) {
 				drawspan.stackindex = (int)(pos - trace.stackFrameIDs);
+				drawspan.tagindex = 0;
+
+				if (span.tag != 0) {
+					const auto tagpos = std::lower_bound(trace.tagIDs, trace.tagIDs + trace.numtags, span.tag);
+					if ((tagpos != (trace.tagIDs + trace.numtags)) && (*tagpos == span.tag)) {
+						drawspan.tagindex = (int)(tagpos - trace.tagIDs) + 1;
+					}
+				}
+
 				spans.push_back(drawspan);
 			}
 		}
 	}
 }
 
-inline void AddSpan(const TraceFile_t& trace, BuildSpan_t& span, uint64_t start, uint64_t end, uint32_t stackframe, std::vector<Span_t>& spans) {
-	if (stackframe != span.stackframe) {
+inline void AddSpan(const TraceFile_t& trace, BuildSpan_t& span, uint64_t start, uint64_t end, uint32_t stackframe, uint32_t tag, std::vector<Span_t>& spans) {
+	if ((stackframe != span.stackframe) || (span.tag != tag)) {
 		FlushSpan(trace, span, spans);
 		span.start = start;
 		span.end = end;
 		span.stackframe = stackframe;
+		span.tag = tag;
 	} else {
 		// check for disjoint
 		if (span.stackframe) {
@@ -261,6 +281,7 @@ inline void AddSpan(const TraceFile_t& trace, BuildSpan_t& span, uint64_t start,
 				span.start = start;
 				span.end = end;
 				span.stackframe = stackframe;
+				span.tag = tag;
 				return;
 			}
 		}
@@ -283,7 +304,7 @@ static void GenerateSpans(TraceFile_t& trace) {
 		}
 		assert(block.numparents <= trace.maxparents);
 		if (((block.start - s_minTicks) < s_vpTimeBounds[1]) && ((trace.micro_end - s_minTicks) > s_vpTimeBounds[0])) {
-			AddSpan(trace, buildSpans[block.numparents], block.start, trace.micro_end, block.stackframe, trace.spans[block.numparents]);
+			AddSpan(trace, buildSpans[block.numparents], block.start, trace.micro_end, block.stackframe, block.tag, trace.spans[block.numparents]);
 		}
 	}
 
@@ -304,7 +325,7 @@ static void GenerateSpans(TraceFile_t& trace) {
 					block = &trace.blocks[blockindex];
 					assert(block->numparents <= trace.maxparents);
 					if (((block->start - s_minTicks) < s_vpTimeBounds[1]) && ((block->end - s_minTicks) > s_vpTimeBounds[0])) {
-						AddSpan(trace, buildSpans[block->numparents], block->start, block->end, block->stackframe, trace.spans[block->numparents]);
+						AddSpan(trace, buildSpans[block->numparents], block->start, block->end, block->stackframe, block->tag, trace.spans[block->numparents]);
 					}
 				}
 			}
@@ -363,11 +384,13 @@ static void OpenTraceFile(const char* nativePath) {
 		uint32_t magic;
 		uint32_t version;
 		int numstacks;
+		int numtags;
 		int numblocks;
 		int numindexblocks;
 		int maxparents;
 		int padd;
 		uint64_t stackofs;
+		uint64_t tagofs;
 		uint64_t indexofs;
 		uint64_t micro_start;
 		uint64_t micro_end;
@@ -382,7 +405,7 @@ static void OpenTraceFile(const char* nativePath) {
 		return;
 	}
 
-	if (header->version != 1) {
+	if (header->version != 2) {
 		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", "Unsupported file version, cannot open file.", s_window);
 		return;
 	}
@@ -394,6 +417,7 @@ static void OpenTraceFile(const char* nativePath) {
 
 	trace.mmap = std::move(mmap);
 	trace.numstacks = header->numstacks;
+	trace.numtags = header->numtags;
 	trace.numblocks = header->numblocks;
 	trace.numindexblocks = header->numindexblocks;
 	trace.maxparents = header->maxparents;
@@ -404,7 +428,8 @@ static void OpenTraceFile(const char* nativePath) {
 	trace.blocks = (const TimingRecord_t*)(base + sizeof(header_t));
 	trace.stackFrameIDs = (const uint32_t*)(base + header->stackofs);
 	trace.stackFrames = (const StackFrame_t*)(base + header->stackofs + (sizeof(uint32_t) * header->numstacks));
-
+	trace.tagIDs = (const uint32_t*)(base + header->tagofs);
+	trace.tags = (const Tag_t*)(base + header->tagofs + (sizeof(uint32_t) * header->numtags));
 	trace.indices = (const IndexBlock_t**)malloc(sizeof(IndexBlock_t*) * header->numindexblocks);
 
 	{
@@ -730,9 +755,10 @@ static void DrawTrace(TraceFile_t& trace) {
 					const auto delta = span.end - span.start;
 
 					ImGui::SetTooltip(
-						"[%s]\n[%s]\n\nWall Time: [%.2f ms] [%u us]\nStart: [%u us]\nEnd: [%u us]",
+						"[%s]\n[%s]\n[%s]\n\nWall Time: [%.2f ms] [%u us]\nStart: [%u us]\nEnd: [%u us]",
 						trace.stackFrames[span.stackindex].label,
 						trace.stackFrames[span.stackindex].location,
+						(span.tagindex != 0) ? trace.tags[span.tagindex-1].string : "<untagged>",
 						delta / 1000.f,
 						delta,
 						span.start,

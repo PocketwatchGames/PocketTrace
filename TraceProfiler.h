@@ -446,6 +446,7 @@ static constexpr trace_crcstr_t trace_crcstr_null(trace_crc_null_tag);
 struct TraceBlock_t {
 	trace_crcstr_t label;
 	trace_crcstr_t location;
+	const char* tag;
 	uint64_t start;
 	uint64_t end;
 	uint64_t childTime;
@@ -485,7 +486,7 @@ inline TraceBlock_t* TraceGetBlockNum(TraceThread_t* thread, int blocknum) {
 }
 
 #define __TRACEPUSHFN(_linkage, _name) \
-_linkage void _name(trace_crcstr_t label, trace_crcstr_t location) { \
+_linkage void _name(trace_crcstr_t label, trace_crcstr_t location, const char* tag) { \
 	auto thread = __tr_thread; \
 	auto index = thread->numblocks; \
 	if (index + 1 >= thread->maxblocks) {\
@@ -497,6 +498,7 @@ _linkage void _name(trace_crcstr_t label, trace_crcstr_t location) { \
 		auto block = TraceGetBlockNum(thread, index);\
 		block->label = crclabel;\
 		block->location = crclocation;\
+		block->tag = nullptr;\
 		block->parent = thread->stack;\
 		block->childTime = 0;\
 		block->start = start;\
@@ -511,6 +513,7 @@ _linkage void _name(trace_crcstr_t label, trace_crcstr_t location) { \
 	auto block = TraceGetBlockNum(thread, index);\
 	block->label = label;\
 	block->location = location;\
+	block->tag = tag;\
 	block->parent = thread->stack;\
 	thread->stack = index;\
 	block->end = 0;\
@@ -540,7 +543,7 @@ __TRACEPOPFN(inline, __TracePopInline)
 #define __TRACEPUSHFNNAME __TracePushInline
 #define __TRACEPOPFNNAME __TracePopInline
 #else
-TRACE_API void __TracePush(trace_crcstr_t label, trace_crcstr_t location);
+TRACE_API void __TracePush(trace_crcstr_t label, trace_crcstr_t location, const char* tag);
 TRACE_API void __TracePop();
 #define __TRACEPUSHFNNAME __TracePush
 #define __TRACEPOPFNNAME __TracePop
@@ -573,31 +576,34 @@ struct __TR_THREADPOP : TraceNotCopyable {
 	}
 };
 
-#define __TRPUSH(_label, _location) \
+#define __TRPUSH(_label, _location, _tag) \
 	{ ++__tr_blocks.count;\
 		static constexpr trace_crcstr_t crclabel(_label);\
 		static constexpr trace_crcstr_t crclocation(_location);\
-		__TRACEPUSHFNNAME(crclabel, crclocation); \
+		__TRACEPUSHFNNAME(crclabel, crclocation, _tag); \
 	} ((void)0)
 
-#define __TRLABEL(_label, _location) \
+#define __TRLABEL(_label, _location, _tag) \
 	if (__tr_blocks.count > 1) {--__tr_blocks.count; __TRACEPOPFNNAME(); }\
-	__TRPUSH(_label, _location)
+	__TRPUSH(_label, _location, _tag)
 
-#define TRLABEL(_label) __TRLABEL(_label, __FILE__ ":" TRACE_STRINGIZE(__LINE__))
+#define TRLABEL(_label) __TRLABEL(_label, __FILE__ ":" TRACE_STRINGIZE(__LINE__), nullptr)
+#define TRLABEL_TAG(_label, _tag) __TRLABEL(_label, __FILE__ ":" TRACE_STRINGIZE(__LINE__), _tag)
 
-#define __TRBLOCK(_label, _location) \
-	__TRPUSH(_label, _location); \
+#define __TRBLOCK(_label, _location, _tag) \
+	__TRPUSH(_label, _location, _tag); \
 	__TR_BLOCKPOP __tr_block_pop_##__COUNTER__(&__tr_blocks)
 
-#define TRBLOCK(_label) __TRBLOCK(_label, __FILE__ ":" TRACE_STRINGIZE(__LINE__))
+#define TRBLOCK(_label) __TRBLOCK(_label, __FILE__ ":" TRACE_STRINGIZE(__LINE__), nullptr)
+#define TRBLOCK_TAG(_label, _tag) __TRBLOCK(_label, __FILE__ ":" TRACE_STRINGIZE(__LINE__), _tag)
 
-#define __TRACE(_label, _location) \
+#define __TRACE(_label, _location, _tag) \
 	__TR_BLOCKS __tr_blocks;\
 	__tr_blocks.count = 0;\
-	__TRPUSH(_label, _location)
+	__TRPUSH(_label, _location, _tag)
 
-#define TRACE() __TRACE(__FUNCTION__, __FILE__ ":" TRACE_STRINGIZE(__LINE__))
+#define TRACE() __TRACE(__FUNCTION__, __FILE__ ":" TRACE_STRINGIZE(__LINE__), nullptr)
+#define TRACE_TAG(_tag) __TRACE(__FUNCTION__, __FILE__ ":" TRACE_STRINGIZE(__LINE__), _tag)
 
 #define TRACE_WRITEBLOCKS(_reset) TraceWriteBlocks(_reset)
 
