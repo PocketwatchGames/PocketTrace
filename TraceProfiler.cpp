@@ -566,11 +566,13 @@ void TraceInit(const char* path) {
 }
 
 void TraceShutdown() {
+	trace_DebugWriteLine("TraceProfiler flusing trace data...");
 	s_init = false;
 	LOCK L(M);
 	for (auto& thread : s_writeThreads) {
 		thread.join();
 	}
+	trace_DebugWriteLine("TraceProfiler done.");
 }
 
 #define TRACE_NULL_API
