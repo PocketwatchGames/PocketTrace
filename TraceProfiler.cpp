@@ -566,7 +566,7 @@ void TraceInit(const char* path) {
 }
 
 void TraceShutdown() {
-	trace_DebugWriteLine("TraceProfiler flusing trace data...");
+	trace_DebugWriteLine("TraceProfiler flushing trace data...");
 	s_init = false;
 	LOCK L(M);
 	for (auto& thread : s_writeThreads) {
