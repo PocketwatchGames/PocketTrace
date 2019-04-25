@@ -539,8 +539,9 @@ _linkage void _name() {\
 TRACE_API void __TracePush(trace_crcstr_t label, trace_crcstr_t location, const char* tag);
 TRACE_API void __TracePop();
 
-#ifdef TRACE_INLINE
 extern THREAD_LOCAL TraceThread_t* __tr_thread;
+
+#ifdef TRACE_INLINE
 __TRACEPUSHFN(inline, __TracePushInline)
 __TRACEPOPFN(inline, __TracePopInline)
 #define __TRACEPUSHFNNAME __TracePushInline
