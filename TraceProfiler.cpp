@@ -265,7 +265,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 				block_t file_block;
 
 				file_block.stackframe = block->location.crc;
-				file_block.tag = block->tag ? crc_str_32(block->tag) : 0;
+				file_block.tag = block->tag ? trace_crc_str_32(block->tag) : 0;
 				file_block.start = GetRelativeMicros(block->start);
 				file_block.end = block->end ? GetRelativeMicros(block->end) : 0;
 				file_block.parent = block->parent;
@@ -384,7 +384,7 @@ static void TraceThreadWriter(TraceThread_t* thread) {
 
 		block_t file_block;
 		file_block.stackframe = block->location.crc;
-		file_block.tag = block->tag ? crc_str_32(block->tag) : 0;
+		file_block.tag = block->tag ? trace_crc_str_32(block->tag) : 0;
 		file_block.start = GetRelativeMicros(block->start);
 		file_block.end = GetRelativeMicros(block->end);
 		file_block.parent = block->parent;
