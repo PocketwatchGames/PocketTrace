@@ -57,7 +57,7 @@ static void trace_vDebugWrite(const char* msg, va_list args) {
 #ifdef _MSC_VER
 	auto c = _vscprintf(msg, args);
 	auto buf = (char*)_alloca((size_t)c + 1);
-	vsprintf(buf, msg, args);
+	vsprintf_s(buf, c + 1, msg, args);
 	buf[c] = 0;
 	OutputDebugStringA(buf);
 #else
@@ -76,7 +76,7 @@ static void trace_vDebugWriteLine(const char* msg, va_list args) {
 #ifdef _MSC_VER
 	auto c = _vscprintf(msg, args);
 	auto buf = (char*)_alloca((size_t)c + 2);
-	vsprintf(buf, msg, args);
+	vsprintf_s(buf, c + 2, msg, args);
 	buf[c] = '\n';
 	buf[c + 1] = 0;
 	OutputDebugStringA(buf);
@@ -510,7 +510,14 @@ void TraceBeginThread(const char* name, uint32_t id) {
 	//thread->tsc_start = TRACE_RDTSC();
 
 	sprintf_s(thread->path, "%s.%s.%u.trace", &s_tracePath[0], name, id);
+
+#ifdef _WIN32
+	if (fopen_s(&thread->fp, thread->path, "wb")) {
+		thread->fp = nullptr;
+	}
+#else
 	thread->fp = fopen(thread->path, "wb");
+#endif
 
 	TRACE_VERIFY(thread->fp);
 	trace_DebugWriteLine("TraceProfiler opened [%s]", thread->path);
@@ -559,7 +566,11 @@ void TraceInit(const char* path) {
 
 		s_ticksPerMicro = (tsc_end - tsc_start) / (micro_end - micro_start);
 
+#ifdef _WIN32
+		strcpy_s(s_tracePath, path);
+#else
 		strcpy(&s_tracePath[0], path);
+#endif
 		s_tscStart = TRACE_RDTSC();
 		s_microStart = GetMicroseconds();
 	}
