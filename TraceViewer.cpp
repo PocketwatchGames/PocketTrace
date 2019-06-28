@@ -238,7 +238,9 @@ struct BuildSpan_t {
 
 static void FlushSpan(const TraceFile_t& trace, const BuildSpan_t& span, std::vector<Span_t>& spans) {
 	if (span.stackframe) {
-		const auto minx = std::max(span.start - s_minTicks, s_vpTimeBounds[0]) - s_vpTimeBounds[0];
+		const auto minx = (span.start < s_minTicks) ? 0 : std::max(span.start - s_minTicks, s_vpTimeBounds[0]) - s_vpTimeBounds[0];
+		assert(span.end >= s_minTicks);
+
 		const auto maxx = std::min(span.end - s_minTicks, s_vpTimeBounds[1]) - s_vpTimeBounds[0];
 		const auto w = (maxx - minx) * s_vpInvTimeScale * s_ww;
 		if (w > 1) {
@@ -324,7 +326,7 @@ static void GenerateSpans(TraceFile_t& trace) {
 					lastBlockIndex = blockindex;
 					block = &trace.blocks[blockindex];
 					assert(block->numparents <= trace.maxparents);
-					if (((block->start - s_minTicks) < s_vpTimeBounds[1]) && ((block->end - s_minTicks) > s_vpTimeBounds[0])) {
+					if (!((block->start > (s_vpTimeBounds[1]+s_minTicks)) || (block->end < (s_vpTimeBounds[0]+ s_minTicks)))) {
 						AddSpan(trace, buildSpans[block->numparents], block->start, block->end, block->stackframe, block->tag, trace.spans[block->numparents]);
 					}
 				}
